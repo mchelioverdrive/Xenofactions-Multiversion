@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.UUID;
 
 import com.hfr.api.PublicChat;
+import com.hfr.util.ChatFormatting;
 import com.hfr.util.ChatTextFilter;
 import com.hfr.blocks.BlockDummyable;
 import com.hfr.blocks.ModBlocks;
@@ -394,7 +395,7 @@ public void handleChatServer(ServerChatEvent event) {
         MinecraftServer server = MinecraftServer.getServer();
         if (!com.hfr.config.PlayerPresenceConfig.enableAdminPrefix || server == null
                 || !server.getConfigurationManager().func_152596_g(player.getGameProfile())
-                || EnumChatFormatting.getTextWithoutFormattingCodes(name).contains("[Admin]")) return name;
+                || ChatFormatting.stripFormatting(name).contains("[Admin]")) return name;
         return EnumChatFormatting.RED + "[Admin]" + EnumChatFormatting.RESET + " " + color + name;
     }
 

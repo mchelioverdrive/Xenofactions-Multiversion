@@ -5,6 +5,7 @@ import com.hfr.clowder.ClowderTerritory;
 import com.hfr.clowder.FactionMemberRecord;
 import com.hfr.clowder.FactionRole;
 import com.hfr.data.ClowderData;
+import com.hfr.util.ChatFormatting;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -117,7 +118,7 @@ public final class FactionLeaderboards {
     }
 
     private static String displayName(String name) {
-        String clean = net.minecraft.util.EnumChatFormatting.getTextWithoutFormattingCodes(name)
+        String clean = ChatFormatting.stripFormatting(name)
             .replaceAll("[\\p{Cntrl}]", "");
         return clean.substring(0, Math.min(64, clean.length()));
     }
