@@ -14,8 +14,10 @@ import cpw.mods.fml.common.eventhandler.EventPriority;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.PlayerEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
+import cpw.mods.fml.common.network.handshake.NetworkDispatcher;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
+import io.netty.channel.Channel;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -34,6 +36,8 @@ import net.minecraft.init.Items;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.network.NetHandlerPlayServer;
+import net.minecraft.network.NetworkManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.stats.Achievement;
 import net.minecraft.stats.StatBase;
@@ -52,6 +56,8 @@ public final class XFAchievements {
     private static final List<Goal> GOALS = new ArrayList<Goal>();
     private static final Map<UUID, Set<String>> PENDING_ACTIONS = new HashMap<UUID, Set<String>>();
     private static final Set<UUID> FAILED = new HashSet<UUID>();
+    private static final Set<UUID> PENDING_SYNC = new HashSet<UUID>();
+    private static final Set<EntityPlayerMP> DISCONNECTING = new HashSet<EntityPlayerMP>();
     private static final ArrayDeque<Runnable> ACTIONS = new ArrayDeque<Runnable>();
     private static Set<StatBase> miningStats;
     private int ticks;
@@ -128,7 +134,7 @@ public final class XFAchievements {
         XFAchievements events = new XFAchievements();
         MinecraftForge.EVENT_BUS.register(events); FMLCommonHandler.instance().bus().register(events);
     }
-    public static void clearTracking() { ACTIONS.clear(); PENDING_ACTIONS.clear(); FAILED.clear(); miningStats = null; }
+    public static void clearTracking() { ACTIONS.clear(); PENDING_ACTIONS.clear(); FAILED.clear(); PENDING_SYNC.clear(); DISCONNECTING.clear(); miningStats = null; }
     /** Server thread only; also drained before logout and shutdown so accepted actions cannot be skipped. */
     public static void flushActions() { Runnable action; while ((action = ACTIONS.poll()) != null) action.run(); }
     public static void onAcquired(EntityPlayer player, ItemStack stack) {
@@ -187,7 +193,30 @@ public final class XFAchievements {
         return true;
     }
     private static long stat(EntityPlayerMP player, StatBase stat) { return Math.max(0, player.func_147099_x().writeStat(stat)); }
-    public static void update(EntityPlayerMP player) {
+    private static final class ProgressUpdate {
+        final NBTTagCompound snapshot;
+        final boolean changed;
+        ProgressUpdate(NBTTagCompound snapshot, boolean changed) { this.snapshot = snapshot; this.changed = changed; }
+    }
+    private static boolean admitted(EntityPlayerMP player) {
+        MinecraftServer server = MinecraftServer.getServer();
+        return player != null && server != null && server.getConfigurationManager() != null
+            && server.getConfigurationManager().playerEntityList.contains(player);
+    }
+    private static boolean canSynchronize(EntityPlayerMP player) {
+        if (!admitted(player) || player.isDead || DISCONNECTING.contains(player)) return false;
+        NetHandlerPlayServer handler = player.playerNetServerHandler;
+        if (handler == null || handler.playerEntity != player) return false;
+        NetworkManager manager = handler.netManager;
+        if (manager == null || manager.getNetHandler() != handler) return false;
+        Channel channel = manager.channel();
+        // Forge's PLAYER target dereferences handler -> manager -> channel before checking its dispatcher.
+        return channel != null && channel.isOpen() && channel.attr(NetworkDispatcher.FML_DISPATCHER).get() != null;
+    }
+    /** Server thread only. Persistence must not depend on (or send through) a live connection. */
+    private static ProgressUpdate saveProgress(EntityPlayerMP player) {
+        // A failed Forge handshake can fire logout before player data is loaded or its handler restored.
+        if (!admitted(player)) return null;
         try {
             NBTTagCompound saved = DailyRewardService.achievementState(player);
             NBTTagCompound achievements = saved.getCompoundTag("Achievements"), before = (NBTTagCompound)achievements.copy();
@@ -219,27 +248,45 @@ public final class XFAchievements {
                 snapshot.setTag(goal.id, entry);
             }
             achievements.setTag("Progress", progress); achievements.setTag("Completed", complete); achievements.setTag("Rewarded", rewarded);
-            if (!achievements.equals(before)) {
+            boolean changed = !achievements.equals(before);
+            if (changed) {
                 saved.setTag("Achievements", achievements); saved.setInteger("AchievementSpins", spins);
                 DailyRewardStore.commit(player, saved); // Receipts and balance become durable together.
-                DailyRewardService.achievementBalanceChanged(player);
             }
             PENDING_ACTIONS.remove(player.getUniqueID()); FAILED.remove(player.getUniqueID());
-            for (Goal goal : GOALS)
-                if (complete.getBoolean(goal.id) && !player.func_147099_x().hasAchievementUnlocked(goal)) player.triggerAchievement(goal);
-            // Periodic snapshots also recover packets dropped during client login/world replacement.
-            PacketDispatcher.wrapper.sendTo(new DailySnapshotPacket(snapshot), player);
-        } catch (IOException | RuntimeException e) {
+            return new ProgressUpdate(snapshot, changed);
+        } catch (IOException | IllegalStateException | ArithmeticException e) {
             // Keep successful actions for retry without publishing an unsaved reward.
-            if (FAILED.add(player.getUniqueID())) XFLog.error("Achievement save/update failed for " + player.getUniqueID() + "; pending actions retained", e);
+            if (FAILED.add(player.getUniqueID())) XFLog.error("Achievement save failed for " + player.getUniqueID() + "; pending actions retained", e);
+            return null;
         }
     }
+    private static void synchronize(EntityPlayerMP player, ProgressUpdate update) {
+        if (update == null || !canSynchronize(player)) return;
+        for (Goal goal : GOALS)
+            if (update.snapshot.getCompoundTag(goal.id).getBoolean("complete")
+                && !player.func_147099_x().hasAchievementUnlocked(goal)) player.triggerAchievement(goal);
+        if (update.changed) DailyRewardService.achievementBalanceChanged(player);
+        // Periodic snapshots also recover packets dropped during client login/world replacement.
+        PacketDispatcher.wrapper.sendTo(new DailySnapshotPacket(update.snapshot), player);
+    }
+    /** Server thread only; commit rewards before publishing native unlocks or progress snapshots. */
+    public static void update(EntityPlayerMP player) { synchronize(player, saveProgress(player)); }
     @SubscribeEvent public void login(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.player instanceof EntityPlayerMP) update((EntityPlayerMP)event.player);
+        if (event.player instanceof EntityPlayerMP) PENDING_SYNC.add(event.player.getUniqueID());
     }
     @SubscribeEvent public void logout(PlayerEvent.PlayerLoggedOutEvent event) {
-        flushActions();
-        if (event.player instanceof EntityPlayerMP) update((EntityPlayerMP)event.player);
+        if (!(event.player instanceof EntityPlayerMP)) return;
+        EntityPlayerMP player = (EntityPlayerMP)event.player;
+        // Suppress synchronization even when flushing a placement calls update() for this player.
+        DISCONNECTING.add(player);
+        try {
+            flushActions();
+            if (admitted(player)) {
+                PENDING_SYNC.remove(player.getUniqueID());
+                saveProgress(player);
+            }
+        } finally { DISCONNECTING.remove(player); }
     }
     @SubscribeEvent public void dimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.player instanceof EntityPlayerMP) update((EntityPlayerMP)event.player);
@@ -247,7 +294,15 @@ public final class XFAchievements {
     @SubscribeEvent public void tick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         flushActions();
-        if (++ticks % 100 != 0) return;
-        for (Object player : MinecraftServer.getServer().getConfigurationManager().playerEntityList) update((EntityPlayerMP)player);
+        boolean periodic = ++ticks % 100 == 0;
+        if (!periodic && PENDING_SYNC.isEmpty()) return;
+        // Resolve the current entity/connection by UUID; never retain a login event's player for a later send.
+        for (Object raw : MinecraftServer.getServer().getConfigurationManager().playerEntityList) {
+            EntityPlayerMP player = (EntityPlayerMP)raw;
+            if ((periodic || PENDING_SYNC.contains(player.getUniqueID())) && canSynchronize(player)) {
+                update(player);
+                PENDING_SYNC.remove(player.getUniqueID());
+            }
+        }
     }
 }
