@@ -113,11 +113,16 @@ public class ClientProxy extends ServerProxy
         mc.func_152344_a(new Runnable() { public void run() {
             if (data == null || mc.thePlayer == null || receiving == null || mc.theWorld != receiving) return;
             if (data.getBoolean("achievementProgress")) { XFAchievements.receiveClient(mc.thePlayer, data); return; }
-            if (mc.currentScreen instanceof com.hfr.inventory.gui.GUIDailyReward
-                && ((com.hfr.inventory.gui.GUIDailyReward)mc.currentScreen).token().equals(data.getString("token")))
-                ((com.hfr.inventory.gui.GUIDailyReward)mc.currentScreen).receive(data);
-            else if (data.getBoolean("opening")) mc.displayGuiScreen(new com.hfr.inventory.gui.GUIDailyReward(data));
+            com.hfr.client.XFLoginFlow.daily(data);
         } });
+    }
+
+    @Override public void receiveOnboarding(final INetHandler handler, final boolean show) {
+        final Minecraft mc = Minecraft.getMinecraft();
+        mc.func_152344_a(() -> {
+            if (mc.getNetHandler() == handler && mc.thePlayer != null && mc.theWorld != null)
+                com.hfr.client.XFLoginFlow.state(show);
+        });
     }
 	@Override public com.hfr.world.earth.XFEarthProfile getEarthHeightProfile(World world) {
 		return com.hfr.client.earth.XFEarthHeightClient.getActiveProfile(world);

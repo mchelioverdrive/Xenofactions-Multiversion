@@ -108,11 +108,36 @@ public final class DailyRewardService {
         }
     }
     public static void open(EntityPlayerMP player) {
+        open(player, true);
+    }
+    private static void open(EntityPlayerMP player, boolean closeContainer) {
         if (!online(player)) return;
         if (LOGIN_OPENED.containsKey(player)) LOGIN_OPENED.put(player, true);
-        player.closeScreen();
+        if (closeContainer) player.closeScreen();
         Session session = new Session(); SESSIONS.put(player, session);
         snapshot(player, session, true, false);
+    }
+    /** Persist per-player dismissal with the existing atomic native-player snapshot. */
+    public static void onboarding(EntityPlayerMP player, int action) {
+        if (!online(player)) return;
+        boolean show = false;
+        try {
+            NBTTagCompound saved = state(player);
+            boolean change = action == com.hfr.packet.XFOnboardingPacket.COMPLETE
+                || action == com.hfr.packet.XFOnboardingPacket.REPLAY
+                || action == com.hfr.packet.XFOnboardingPacket.LEGACY_DONE && !saved.hasKey("OnboardingComplete");
+            if (change) {
+                saved.setBoolean("OnboardingComplete", action != com.hfr.packet.XFOnboardingPacket.REPLAY);
+                DailyRewardStore.commit(player, saved);
+            }
+            show = !saved.getBoolean("OnboardingComplete");
+        } catch (IOException | IllegalStateException e) {
+            XFLog.error("Could not save onboarding preference for " + player.getUniqueID(), e);
+            player.addChatMessage(new ChatComponentTranslation("xf.onboarding.save_failed"));
+        }
+        // Completion acknowledgements must not queue another opening, even if saving failed.
+        PacketDispatcher.wrapper.sendTo(new com.hfr.packet.XFOnboardingPacket.State(
+            action != com.hfr.packet.XFOnboardingPacket.COMPLETE && show), player);
     }
     /** Readiness is only a hint: loaded server state authorizes this once-per-login opening. */
     public static void loginReady(EntityPlayerMP player) {
@@ -121,7 +146,7 @@ public final class DailyRewardService {
         try {
             NBTTagCompound saved = state(player);
             if (!unfinished(saved) && !saved.getBoolean("DeliveryDue")
-                && DailyRewardConfig.ready() && eligible(saved, today())) open(player);
+                && DailyRewardConfig.ready() && eligible(saved, today())) open(player, false);
         } catch (IllegalStateException e) { say(player, "unavailable"); }
     }
     private static boolean online(EntityPlayerMP player) {
