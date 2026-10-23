@@ -27,6 +27,13 @@ import org.lwjgl.opengl.GL11;
 
 @SideOnly(Side.CLIENT)
 public final class GuiXFEarthMap extends GuiScreen {
+    private final GuiScreen parent;
+    private boolean introduction;
+    private int introPage;
+    public GuiXFEarthMap() { this(null, false); }
+    public GuiXFEarthMap(GuiScreen parent, boolean introduction) {
+        this.parent = parent; this.introduction = introduction;
+    }
     private static int nextRequest;
     // LWJGL 2 requires 16 remaining integers even though GL_SCISSOR_BOX returns four.
     private final IntBuffer scissor = BufferUtils.createIntBuffer(16);
@@ -53,10 +60,22 @@ public final class GuiXFEarthMap extends GuiScreen {
         buttonList.add(new GuiButton(2, start + 60, height - 24, 86, 20, I18n.format("gui.hfr.earthmap.center")));
         buttonList.add(new GuiButton(3, start + 150, height - 24, 70, 20, I18n.format("gui.hfr.earthmap.full")));
         buttonList.add(new GuiButton(4, start + 224, height - 24, 54, 20, I18n.format("gui.done")));
-        String[] labels={"Roads","Fields","Buildings","Business","Bounds","Claims","Terrain"};
+        String[] labels={"roads","fields","buildings","business","bounds","claims","terrain"};
         int buttonWidth=Math.max(36,(width-20)/4);
-        for(int i=0;i<7;i++)buttonList.add(new GuiButton(10+i,left()+(i%4)*buttonWidth,32+(i/4)*20,buttonWidth-3,18,((enabledLayers&(1<<i))!=0?"+ ":"- ")+labels[i]));
-        buttonList.add(new GuiButton(17,left()+3*buttonWidth,52,buttonWidth-3,18,"Info"));
+        for(int i=0;i<7;i++)buttonList.add(new GuiButton(10+i,left()+(i%4)*buttonWidth,32+(i/4)*20,buttonWidth-3,18,((enabledLayers&(1<<i))!=0?"+ ":"- ")+I18n.format("gui.hfr.earthmap.layer."+labels[i])));
+        buttonList.add(new GuiButton(17,left()+3*buttonWidth,52,buttonWidth-3,18,I18n.format("xf.home.help")));
+        // The header is useful even when this dimension has no Earth profile.
+        buttonList.add(new GuiButton(18,10,7,70,18,I18n.format("xf.home.start")));
+        buttonList.add(new GuiButton(19,width-80,7,70,18,I18n.format("xf.home.title")));
+        if (introduction) {
+            int w = Math.min(400, width - 36), x = (width - w) / 2;
+            buttonList.add(new GuiButton(20,x,height-55,(w-6)/2,20,I18n.format("xf.home.start")));
+            buttonList.add(new GuiButton(21,x+(w+6)/2,height-55,(w-6)/2,20,I18n.format("xf.map.explore")));
+            if (introLines().size() > introCapacity()) {
+                buttonList.add(new GuiButton(22,x,height-80,40,18,"<"));
+                buttonList.add(new GuiButton(23,x+w-40,height-80,40,18,">"));
+            }
+        }
         if (requestedWorld != mc.theWorld) requestProfile();
         clampView();
     }
@@ -130,21 +149,29 @@ public final class GuiXFEarthMap extends GuiScreen {
         roadNotice=frame.notice;if(frame.notice.contains("busy"))return;layers=frame;
         if(selected!=null&&selected.layer!=5){com.hfr.world.earth.map.XFEarthMapLayers.Feature replacement=null;for(com.hfr.world.earth.map.XFEarthMapLayers.Feature f:frame.features)if(f.key.equals(selected.key))replacement=f;selected=replacement;}
     }
-    private void showInfo(){
-        final GuiXFEarthMap map=this;
+    public void showInfo(final GuiScreen back){
         mc.displayGuiScreen(new GuiScreen(){
             private int page;
-            public void initGui(){buttonList.clear();buttonList.add(new GuiButton(0,width/2-50,height-25,100,20,"Back"));buttonList.add(new GuiButton(1,10,height-25,60,20,"Previous"));buttonList.add(new GuiButton(2,width-70,height-25,60,20,"Next"));}
-            protected void actionPerformed(GuiButton button){if(button.id==0)mc.displayGuiScreen(map);else page=Math.max(0,page+(button.id==1?-1:1));}
+            public void initGui(){buttonList.clear();buttonList.add(new GuiButton(0,width/2-50,height-25,100,20,I18n.format("xf.nav.back")));buttonList.add(new GuiButton(1,10,height-25,60,20,I18n.format("xf.tutorial.back")));buttonList.add(new GuiButton(2,width-70,height-25,60,20,I18n.format("xf.tutorial.next")));}
+            protected void actionPerformed(GuiButton button){if(button.id==0)mc.displayGuiScreen(back);else page=Math.max(0,page+(button.id==1?-1:1));}
+            protected void keyTyped(char c,int key){if(key==1)mc.displayGuiScreen(back);}
             public boolean doesGuiPauseGame(){return false;}
             public void drawScreen(int x,int y,float ticks){drawDefaultBackground();int capacity=Math.max(1,(height-50)/11);
-                String info=gripNotice+". "+(roads==null?"":roads.credit)+". GRIP is a historical generalized inventory, unsuitable for navigation; coverage/topology may be incomplete. The Roads toggle controls GRIP and OSM. GRIP lines show prepared source routes independently of OSM selection and do not establish matching blocks. OSM: "+(layers==null?"© OpenStreetMap contributors / ODbL":layers.attribution)+". "+roadNotice+". Source coverage is unverified. Click again to cycle overlapping vector features. Administrative boundaries are informational. Claims use complete territorial ownership: faction color, orange safezones and red warzones; wilderness has no claim fill. Claims do not depend on geographic data or zoom. Terrain is off by default; enabling it shows bounded diagnostic outlines: cyan pending/unavailable, green eligible, red entirely deep water. Imported features differ from recorded generic generated fragments; processed road chunks do not prove current road blocks. "+(selected==null?"":" Selected: "+selected.name+" / "+selected.category+" / "+selected.source+" / "+selected.detail);
+                String info=I18n.format("xf.map.sources.body").replace("\\n","\n")+"\n\n"+(roads==null?"":roads.credit)+"\n"+(layers==null?"\u00a9 OpenStreetMap contributors / ODbL":layers.attribution)+"\n\n"+gripNotice+"\n"+roadNotice+(selected==null?"":"\n\n"+selected.name+"\n"+selected.source+"\n"+selected.detail);
                 java.util.List<?> lines=fontRendererObj.listFormattedStringToWidth(info,width-20);page=Math.min(page,Math.max(0,(lines.size()-1)/capacity));
                 for(int i=page*capacity,row=12;i<Math.min(lines.size(),(page+1)*capacity);i++,row+=11)drawString(fontRendererObj,lines.get(i).toString(),10,row,0xffffff);super.drawScreen(x,y,ticks);
             }
         });
     }
-    @Override public void onGuiClosed(){EarthMapLayerCache.cancel();dragging=false;}
+    private java.util.List<String> introLines() {
+        return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.map.intro").replace("\\n","\n"), Math.min(400,width-36));
+    }
+    private int introCapacity() { return Math.max(1,(height-145)/11); }
+    private void dismissIntroduction() {
+        if (introduction) { introduction=false; com.hfr.client.XFLoginFlow.complete(); }
+    }
+    @Override public void onGuiClosed(){dismissIntroduction();EarthMapLayerCache.cancel();dragging=false;}
+    @Override protected void keyTyped(char c,int key) { if(key==1){dismissIntroduction();mc.displayGuiScreen(parent);} }
     @Override public boolean doesGuiPauseGame() { return false; }
     private int left() { return 10; }
     private int top() { return 76; }
@@ -172,8 +199,12 @@ public final class GuiXFEarthMap extends GuiScreen {
         clampView();
     }
     @Override protected void actionPerformed(GuiButton button) {
-        if (button.id == 4) { mc.displayGuiScreen(null); return; }
-        if(button.id==17){showInfo();return;}
+        if (button.id == 20 || button.id == 18) { dismissIntroduction(); mc.displayGuiScreen(new com.hfr.inventory.gui.GUIXenofactionsTutorial(this)); return; }
+        if (button.id == 21) { dismissIntroduction(); initGui(); return; }
+        if (button.id == 22 || button.id == 23) { introPage=Math.max(0,Math.min((introLines().size()-1)/introCapacity(),introPage+(button.id==22?-1:1))); return; }
+        if (button.id == 19) { mc.displayGuiScreen(new com.hfr.inventory.gui.GUIXenofactionsHome()); return; }
+        if (button.id == 4) { mc.displayGuiScreen(parent); return; }
+        if(button.id==17){mc.displayGuiScreen(new com.hfr.inventory.gui.GUIXFHelp(this));return;}
         if(button.id>=10&&button.id<17){enabledLayers^=1<<(button.id-10);button.displayString=((enabledLayers&(1<<(button.id-10)))!=0?"+ ":"- ")+button.displayString.substring(2);selected=null;if(button.id!=15){EarthMapLayerCache.cancel();roadView="";roadTicks=39;}return;}
         if (data == null) return;
         if (button.id == 0 || button.id == 1) changeZoom(button.id == 0 ? 1.5 : 1 / 1.5, width / 2, top() + viewHeight() / 2);
@@ -185,7 +216,7 @@ public final class GuiXFEarthMap extends GuiScreen {
     }
     @Override protected void mouseClicked(int x, int y, int button) {
         super.mouseClicked(x, y, button);
-        if (button == 0 && data != null && inside(x, y)) { dragging = true; lastX = pressX = x; lastY = pressY = y; }
+        if (!introduction && mc.currentScreen==this && button == 0 && data != null && inside(x, y)) { dragging = true; lastX = pressX = x; lastY = pressY = y; }
     }
     @Override protected void mouseClickMove(int x, int y, int button, long elapsed) {
         if (dragging && button == 0 && data != null) {
@@ -207,13 +238,11 @@ public final class GuiXFEarthMap extends GuiScreen {
         super.handleMouseInput();
         int wheel = Mouse.getEventDWheel();
         int x = Mouse.getEventX() * width / mc.displayWidth, y = height - Mouse.getEventY() * height / mc.displayHeight - 1;
-        if (wheel != 0 && inside(x, y)) changeZoom(wheel > 0 ? 1.25 : 1 / 1.25, x, y);
+        if (!introduction && wheel != 0 && inside(x, y)) changeZoom(wheel > 0 ? 1.25 : 1 / 1.25, x, y);
     }
     @Override public void drawScreen(int mouseX, int mouseY, float partialTicks) {
         drawDefaultBackground();
         drawCenteredString(fontRendererObj, I18n.format("item.earth_map.name"), width / 2, 7, 0xffffff);
-        if (data != null) drawCenteredString(fontRendererObj, fontRendererObj.trimStringToWidth(data.profile.getProfile()
-                + "  1:" + data.profile.getEffectiveScale(), viewWidth()), width / 2, 22, 0xcccccc);
         drawRect(left() - 1, top() - 1, left() + viewWidth() + 1, top() + viewHeight() + 1, 0xff777777);
         drawRect(left(), top(), left() + viewWidth(), top() + viewHeight(), 0xff182333);
         if (data != null && requestedWorld == mc.theWorld) drawMap();
@@ -228,8 +257,21 @@ public final class GuiXFEarthMap extends GuiScreen {
             else if (data != null && !data.contains(x, z))
                 drawCenteredString(fontRendererObj, I18n.format("gui.hfr.earthmap.outside"), width / 2, height - 53, 0xffcc66);
         }
-        drawCenteredString(fontRendererObj, fontRendererObj.trimStringToWidth("Click: select | "+I18n.format("gui.hfr.earthmap.controls")+" | \u00a9 OpenStreetMap contributors / ODbL",width-16), width / 2, height - 37, 0xaaaaaa);
-        for (Object object : buttonList) { GuiButton button = (GuiButton)object; if (button.id != 4) button.enabled = data != null; }
+        drawCenteredString(fontRendererObj, fontRendererObj.trimStringToWidth(I18n.format("gui.hfr.earthmap.controls"),width-16), width / 2, height - 37, 0xaaaaaa);
+        if (introduction) {
+            int w=Math.min(400,width-36),x=(width-w)/2;
+            drawRect(x-8,28,x+w+8,height-29,0xf0182333);
+            drawCenteredString(fontRendererObj,I18n.format("xf.map.welcome"),width/2,40,0xffdd88);
+            java.util.List<String> lines=introLines();
+            introPage=Math.min(introPage,Math.max(0,(lines.size()-1)/introCapacity()));
+            for(int i=introPage*introCapacity(),y=60;i<Math.min(lines.size(),(introPage+1)*introCapacity());i++,y+=11)
+                drawString(fontRendererObj,lines.get(i),x,y,0xeeeeee);
+        }
+        for (Object object : buttonList) {
+            GuiButton button = (GuiButton)object;
+            button.visible = !introduction || button.id>=20;
+            button.enabled = button.id>=17 || button.id==4 || data!=null;
+        }
         super.drawScreen(mouseX, mouseY, partialTicks);
     }
     private void drawStatus(String key) {
@@ -278,19 +320,19 @@ public final class GuiXFEarthMap extends GuiScreen {
             drawClaims(ox,oz,w,h);
             if(layers!=null)layers.draw(ox,oz,w,h,enabledLayers);
             String claimNotice=ClientClaimOverlayCache.notice();
-            drawString(fontRendererObj,claimNotice.isEmpty()?"Claims: faction color / orange safe / red war":fontRendererObj.trimStringToWidth(claimNotice,viewWidth()-8),left()+4,top()+4,0xffffff);
-            if((enabledLayers&64)!=0)drawString(fontRendererObj,"Terrain: cyan pending / green eligible / red deep water",left()+4,top()+15,0xffffff);
-            drawString(fontRendererObj,"Source outlines; brighter = recorded generated evidence",left()+4,top()+26,0xdddddd);
-            drawString(fontRendererObj,fontRendererObj.trimStringToWidth(gripNotice,viewWidth()-8),left()+4,top()+48,0xffd777);
+            drawString(fontRendererObj,fontRendererObj.trimStringToWidth(I18n.format(claimNotice.isEmpty()?"xf.map.legend":"xf.map.claims_stale"),viewWidth()-8),left()+4,top()+4,0xffffff);
+            if((enabledLayers&64)!=0)drawString(fontRendererObj,fontRendererObj.trimStringToWidth(I18n.format("xf.map.terrain_legend"),viewWidth()-8),left()+4,top()+15,0xffffff);
+
+
             drawString(fontRendererObj,"\u00a9 OpenStreetMap contributors / ODbL",left()+4,top()+viewHeight()-50,0xeeeeee);
             if(selected!=null){
-                String status=selected.layer==5?"Authoritative territory":selected.layer==6?"Terrain diagnostic":selected.state==1?"Recorded generic generated fragment":selected.state==2?"Processed road chunk fragment (blocks unverified)":"Imported; generation unrecorded/unavailable here";
-                String title=(selected.name.isEmpty()?"Unnamed feature":selected.name)+" | "+selected.category;
+                String status=I18n.format(selected.layer==5?"xf.map.claim_detail":selected.layer==6?"xf.map.terrain_detail":"xf.map.feature_detail");
+                String title=selected.name.isEmpty()?I18n.format("xf.map.unnamed"):selected.name;
                 drawRect(left()+2,top()+viewHeight()-38,left()+viewWidth()-2,top()+viewHeight()-2,0xcc000000);
                 drawString(fontRendererObj,fontRendererObj.trimStringToWidth(title,viewWidth()-8),left()+4,top()+viewHeight()-36,0xffffff);
-                drawString(fontRendererObj,fontRendererObj.trimStringToWidth(selected.source+" | "+status,viewWidth()-8),left()+4,top()+viewHeight()-25,0xdddddd);
-                drawString(fontRendererObj,fontRendererObj.trimStringToWidth(selected.detail,viewWidth()-8),left()+4,top()+viewHeight()-14,0xdddddd);
-            }else if(!roadNotice.isEmpty())drawString(fontRendererObj,fontRendererObj.trimStringToWidth("OSM/server layers: "+roadNotice,viewWidth()-8),left()+4,top()+viewHeight()-12,0xffffff);
+                drawString(fontRendererObj,fontRendererObj.trimStringToWidth(status,viewWidth()-8),left()+4,top()+viewHeight()-25,0xdddddd);
+                drawString(fontRendererObj,fontRendererObj.trimStringToWidth(I18n.format("xf.map.more"),viewWidth()-8),left()+4,top()+viewHeight()-14,0xdddddd);
+            }
             if (mc.thePlayer != null) {
                 double actualX = ox + data.mapX(mc.thePlayer.posX) * w, actualZ = oz + data.mapZ(mc.thePlayer.posZ) * h;
                 int px = (int)clamp(actualX, left() + 5, left() + viewWidth() - 6);
@@ -380,3 +422,4 @@ public final class GuiXFEarthMap extends GuiScreen {
         } finally { GL11.glPopAttrib(); }
     }
 }
+

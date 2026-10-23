@@ -15,7 +15,7 @@ public final class DailySnapshotPacket implements IMessage {
     public void toBytes(ByteBuf buf) { ByteBufUtils.writeTag(buf, data); }
     public static final class Handler implements IMessageHandler<DailySnapshotPacket, IMessage> {
         public IMessage onMessage(DailySnapshotPacket message, MessageContext context) {
-            com.hfr.main.MainRegistry.proxy.receiveDailyReward(message.data); return null;
+            com.hfr.main.MainRegistry.proxy.receiveDailyReward(context.netHandler, message.data); return null;
         }
     }
 }

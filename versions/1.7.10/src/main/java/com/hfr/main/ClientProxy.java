@@ -107,11 +107,11 @@ public class ClientProxy extends ServerProxy
             com.hfr.client.flag.FactionFlagTextureManager.requestFlagIfMissing(tile.getFactionName());
         }
     }
-    @Override public void receiveDailyReward(final NBTTagCompound data) {
+    @Override public void receiveDailyReward(final INetHandler handler, final NBTTagCompound data) {
         final Minecraft mc = Minecraft.getMinecraft();
         final World receiving = mc.theWorld;
         mc.func_152344_a(new Runnable() { public void run() {
-            if (data == null || mc.thePlayer == null || receiving == null || mc.theWorld != receiving) return;
+            if (data == null || mc.getNetHandler() != handler || mc.thePlayer == null || receiving == null || mc.theWorld != receiving) return;
             if (data.getBoolean("achievementProgress")) { XFAchievements.receiveClient(mc.thePlayer, data); return; }
             com.hfr.client.XFLoginFlow.daily(data);
         } });

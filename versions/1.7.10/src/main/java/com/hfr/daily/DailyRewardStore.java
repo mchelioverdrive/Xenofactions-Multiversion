@@ -32,6 +32,8 @@ public final class DailyRewardStore {
         return tag;
     }
     private static void validate(NBTTagCompound tag) {
+        if (tag.hasKey("OnboardingComplete") && !tag.hasKey("OnboardingComplete", 1))
+            throw new IllegalStateException("Malformed onboarding preference");
         int version = tag.getInteger("Version");
         if ((version < 1 || version > 4) || !tag.hasKey("Revision", 4) || tag.getLong("Revision") < 0
             || !tag.hasKey("Streak", 3) || tag.getInteger("Streak") < 0 || !tag.hasKey("Pending", 9)

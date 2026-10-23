@@ -16,7 +16,7 @@ public final class GUIXFHelp extends GuiScreen implements GuiYesNoCallback {
     public GUIXFHelp(GuiScreen parent) { this.parent = parent; }
     public boolean doesGuiPauseGame() { return false; }
     private int capacity() { return Math.max(1, (height - 90) / 12); }
-    private List<String> lines() { return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.help." + TOPICS[topic] + ".body"), Math.min(440, width - 28)); }
+    private List<String> lines() { return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.help." + TOPICS[topic] + ".body").replace("\\n","\n"), Math.min(440, width - 28)); }
     public void initGui() {
         buttonList.clear();
         int w = Math.min(440, width - 20), x = (width - w) / 2;
@@ -30,6 +30,8 @@ public final class GUIXFHelp extends GuiScreen implements GuiYesNoCallback {
             GuiButton next = new GuiButton(2, x + w - 70, height - 50, 70, 20, I18n.format("xf.tutorial.next"));
             prev.enabled = page > 0; next.enabled = (page + 1) * capacity() < lines().size();
             buttonList.add(prev); buttonList.add(next);
+            if (topic == 0 && parent instanceof com.hfr.client.earth.GuiXFEarthMap)
+                buttonList.add(new GuiButton(4,x,height-25,80,20,I18n.format("xf.map.sources")));
         }
         buttonList.add(new GuiButton(0, width / 2 - 50, height - 25, 100, 20, I18n.format("xf.nav.back")));
     }
@@ -37,6 +39,7 @@ public final class GUIXFHelp extends GuiScreen implements GuiYesNoCallback {
         if (b.id >= 10) { topic = b.id - 10; page = 0; initGui(); }
         else if (b.id == 0) back();
         else if (b.id == 3) mc.displayGuiScreen(new GuiYesNo(this, I18n.format("xf.confirm.reset_tutorial"), I18n.format("xf.help.replay"), 3));
+        else if (b.id == 4) ((com.hfr.client.earth.GuiXFEarthMap)parent).showInfo(this);
         else { page += b.id == 1 ? -1 : 1; initGui(); }
     }
     public void confirmClicked(boolean ok, int id) {

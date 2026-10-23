@@ -18,13 +18,14 @@ public final class XFLoginFlow {
     private static NetHandlerPlayClient connection;
     private static boolean requested, resolved, mapPending;
     private static NBTTagCompound daily;
+    private static net.minecraft.world.World dailyWorld;
     private XFLoginFlow() { }
 
     public static void tick() {
         Minecraft mc = Minecraft.getMinecraft();
         NetHandlerPlayClient current = mc.getNetHandler();
         if (current != connection || current == null) {
-            connection = current; requested = resolved = mapPending = false; daily = null;
+            connection = current; requested = resolved = mapPending = false; daily = null; dailyWorld = null;
         }
         if (current == null || mc.thePlayer == null || mc.theWorld == null
                 || mc.currentScreen instanceof GuiDownloadTerrain) return;
@@ -41,7 +42,9 @@ public final class XFLoginFlow {
             mc.displayGuiScreen(new GuiXFEarthMap(null, true));
         } else if (daily != null) {
             NBTTagCompound next = daily; daily = null;
-            mc.displayGuiScreen(new GUIDailyReward(next));
+            // Dimension changes/respawns retire server wheel sessions. Fetch a fresh one.
+            if (dailyWorld != mc.theWorld) mc.thePlayer.sendChatMessage("/xdaily");
+            else mc.displayGuiScreen(new GUIDailyReward(next));
         }
     }
     public static void state(boolean show) {
@@ -65,6 +68,6 @@ public final class XFLoginFlow {
         }
         if (daily != null && daily.getString("token").equals(next.getString("token"))) {
             if (next.getLong("revision") > daily.getLong("revision")) daily = next;
-        } else if (next.getBoolean("opening")) daily = next;
+        } else if (next.getBoolean("opening")) { daily = next; dailyWorld = mc.theWorld; }
     }
 }
