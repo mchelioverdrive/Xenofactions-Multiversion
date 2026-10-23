@@ -32,6 +32,13 @@ public final class DailyRewardStore {
         return tag;
     }
     private static void validate(NBTTagCompound tag) {
+        if (tag.hasKey("FactionSetup")) {
+            NBTTagCompound guide = tag.getCompoundTag("FactionSetup");
+            if (!tag.hasKey("FactionSetup", 10) || !guide.hasKey("Faction", 8) || guide.getString("Faction").length() != 36
+                    || !guide.hasKey("Step", 3) || guide.getInteger("Step") < 1 || guide.getInteger("Step") > 4
+                    || !guide.hasKey("Hidden", 1))
+                throw new IllegalStateException("Malformed faction setup state");
+        }
         if (tag.hasKey("OnboardingComplete") && !tag.hasKey("OnboardingComplete", 1))
             throw new IllegalStateException("Malformed onboarding preference");
         int version = tag.getInteger("Version");

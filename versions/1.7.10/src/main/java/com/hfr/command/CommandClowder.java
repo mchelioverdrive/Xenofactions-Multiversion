@@ -129,6 +129,16 @@ public class CommandClowder extends CommandBase {
 
 	@Override
 	public void processCommand(ICommandSender sender, String[] args) {
+        try { executeCommand(sender, args); }
+        finally { com.hfr.clowder.FactionSetupGuide.commandFinished(sender, args); }
+    }
+
+    private void rejectSetup(ICommandSender sender, String reason) {
+        sender.addChatMessage(new ChatComponentText(ERROR + reason));
+        if (sender instanceof EntityPlayer) com.hfr.clowder.FactionSetupGuide.rejected((EntityPlayer)sender, reason);
+    }
+
+    private void executeCommand(ICommandSender sender, String[] args) {
 
 		//todo add a /c merge command to merge into other factions (with consent ofc)
 
@@ -428,24 +438,25 @@ private void cmdCreate(ICommandSender sender, String name) {
 		if(com.hfr.clowder.FactionMembershipGuard.rejectIfBlocked(sender)) return;
 		String factionName = Clowder.canonicalizeClowderName(name);
 
-		if(factionName.isEmpty()) { sender.addChatMessage(new ChatComponentText(ERROR + "Faction name cannot be empty.")); return; }
+		if(factionName.isEmpty()) { rejectSetup(sender, "Faction name cannot be empty."); return; }
 		FactionCreationCooldownData.migrateFallback(player);
 		long cooldownUntil = FactionCreationCooldownData.getCooldownUntil(player);
-		if(cooldownUntil > System.currentTimeMillis()) { sender.addChatMessage(new ChatComponentText(ERROR + "You cannot create a faction for " + FactionCreationCooldownData.formatRemaining(cooldownUntil - System.currentTimeMillis()) + ". You may still apply to or join factions.")); return; }
+		if(cooldownUntil > System.currentTimeMillis()) { rejectSetup(sender, "You cannot create a faction for " + FactionCreationCooldownData.formatRemaining(cooldownUntil - System.currentTimeMillis()) + ". You may still apply to or join factions."); return; }
 
 		if(Clowder.getClowderFromPlayer(player) == null) {
 
 			if(Clowder.getClowderFromName(factionName) == null) {
-				if(!Clowder.createClowder(player, factionName)) { sender.addChatMessage(new ChatComponentText(ERROR + "Faction creation was rejected.")); return; }
+				if(!Clowder.createClowder(player, factionName)) { rejectSetup(sender, "Faction creation was rejected."); return; }
+				com.hfr.clowder.FactionSetupGuide.created(player);
 				sender.addChatMessage(new ChatComponentText(TITLE + "Created faction " + factionName + "!"));
 				sender.addChatMessage(new ChatComponentText(INFO + "Use /c claim to get started!"));
 				sender.addChatMessage(new ChatComponentText(INFO + "and use /c sethome to set a faction home!"));
 			} else {
-				sender.addChatMessage(new ChatComponentText(ERROR + "This name is already taken!"));
+				rejectSetup(sender, "This name is already taken!");
 			}
 
 		} else {
-			sender.addChatMessage(new ChatComponentText(ERROR + "You can not create a new faction while already being in one!"));
+			rejectSetup(sender, "You can not create a new faction while already being in one!");
 		}
 	}
 
@@ -1310,7 +1321,7 @@ private void cmdCreate(ICommandSender sender, String name) {
 		EntityPlayer player = getCommandSenderAsPlayer(sender);
 		Clowder clowder = Clowder.getClowderFromPlayer(player);
         if (clowder != null && !clowder.isInCapital(player.worldObj, (int)Math.floor(player.posX), (int)Math.floor(player.posZ))) {
-            sender.addChatMessage(new ChatComponentText(ERROR + "Set home inside your faction's designated capital. Use /c capital to inspect it."));
+            rejectSetup(sender, "Set home inside your faction's designated capital. Use /c capital to inspect it.");
             return;
         }
 
@@ -1325,24 +1336,22 @@ private void cmdCreate(ICommandSender sender, String name) {
 						clowder.setHome(player.posX, player.posY, player.posZ, player);
 						clowder.notifyAll(player.worldObj, new ChatComponentText(INFO + "Home set!"));
 						clowder.addSethomeDelay(600, player.worldObj); //10 minute delay
+						com.hfr.clowder.FactionSetupGuide.homeSet(player);
 					}
 					else {
-						sender.addChatMessage(
-								new ChatComponentText(ERROR + "Please wait " + (int)clowder.sethomeDelay + " seconds to set home again!"));
+						rejectSetup(sender, "Please wait " + (int)clowder.sethomeDelay + " seconds to set home again!");
 					}
 
 				} else {
-					sender.addChatMessage(
-                            new ChatComponentText(ERROR + "You can only set the home inside your designated capital!"));
+					rejectSetup(sender, "You can only set the home inside your designated capital!");
 				}
 
 			} else {
-				sender.addChatMessage(
-						new ChatComponentText(ERROR + "You lack the permissions to set this faction's home point!"));
+				rejectSetup(sender, "You lack the permissions to set this faction's home point!");
 			}
 
 		} else {
-			sender.addChatMessage(new ChatComponentText(ERROR + "You are not in any faction!"));
+			rejectSetup(sender, "You are not in any faction!");
 		}
 	}
 
@@ -1721,29 +1730,30 @@ private void cmdCreate(ICommandSender sender, String name) {
 		Clowder clowder = Clowder.getClowderFromPlayer(player);
 
 		if(cityName == null || cityName.trim().isEmpty()) {
-			sender.addChatMessage(new ChatComponentText(ERROR + "Usage: /c claim <city name>"));
+			rejectSetup(sender, "Usage: /c claim <city name>");
 			return;
 		}
 		cityName = cityName.trim();
 		if(cityName.length() < XFConfig.claimNameMinLength || cityName.length() > XFConfig.claimNameMaxLength) {
-			sender.addChatMessage(new ChatComponentText(ERROR + "City names must be " + XFConfig.claimNameMinLength + "-" + XFConfig.claimNameMaxLength + " characters."));
+			rejectSetup(sender, "City names must be " + XFConfig.claimNameMinLength + "-" + XFConfig.claimNameMaxLength + " characters.");
 			return;
 		}
 		if(XFConfig.claimNameRequireUnique && !ClowderTerritory.isCityNameAvailable(cityName, null)) {
-			sender.addChatMessage(new ChatComponentText(ERROR + "A city named " + cityName + " already exists."));
+			rejectSetup(sender, "A city named " + cityName + " already exists.");
 			return;
 		}
 
 		if(clowder != null) {
 
+			if(com.hfr.clowder.FactionSetupGuide.awaitingFlag(player)) return;
 			boolean firstCity = clowder.getOwnedCityCount() == 0;
 			float foundingCost = firstCity ? 0F : clowder.getCityFoundingCost();
 			float foundingUpkeep = XFConfig.cityUpkeep(CityLevel.SETTLEMENT);
 			if(!clowder.activeWars.isEmpty() || com.hfr.clowder.CityCenterRelocationManager.hasPending(clowder)) {
-				sender.addChatMessage(new ChatComponentText(ERROR + "A City Center cannot be founded during war or a pending relocation.")); return;
+				rejectSetup(sender, "A City Center cannot be founded during war or a pending relocation."); return;
 			}
 			if(clowder.getPrestige() < foundingCost || (!firstCity && clowder.getPrestigeReq() + foundingUpkeep > clowder.getPrestige() - foundingCost)) {
-				sender.addChatMessage(new ChatComponentText(ERROR + "Founding a City Center requires " + foundingCost + " prestige and " + foundingUpkeep + " upkeep capacity."));
+				rejectSetup(sender, "Founding a City Center requires " + foundingCost + " prestige and " + foundingUpkeep + " upkeep capacity.");
 				return;
 			}
 
@@ -1753,7 +1763,7 @@ private void cmdCreate(ICommandSender sender, String name) {
 			//	return;
 			//}
 			if(!XFConfig.enableSurvivalRecipes && player.inventory.hasItem(cityCenterItem)) {
-				sender.addChatMessage(new ChatComponentText(ERROR + "You already have a flag in your inventory!"));
+				rejectSetup(sender, "You already have a flag in your inventory!");
 				return;
 			}
 
@@ -1761,12 +1771,11 @@ private void cmdCreate(ICommandSender sender, String name) {
 			stack.stackTagCompound = new NBTTagCompound();
 			stack.stackTagCompound.setString("cityName", cityName);
 			stack.setStackDisplayName("City Center: " + cityName);
-			player.inventory.addItemStackToInventory(stack);
-			player.inventoryContainer.detectAndSendChanges();
+			if(!(player instanceof EntityPlayerMP) || !com.hfr.clowder.FactionSetupGuide.deliver((EntityPlayerMP)player, stack)) return;
 			sender.addChatMessage(new ChatComponentText(INFO + "Place the City Center to found " + cityName + ". Founding cost is " + foundingCost + " prestige and " + foundingUpkeep + " upkeep capacity."));
 
 		} else {
-			sender.addChatMessage(new ChatComponentText(ERROR + "You are not in any faction!"));
+			rejectSetup(sender, "You are not in any faction!");
 		}
 	}
 

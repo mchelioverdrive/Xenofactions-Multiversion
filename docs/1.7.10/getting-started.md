@@ -2,6 +2,16 @@
 
 This guide explains the basic gameplay loop for a new player on a Xenofactions server.
 
+Open the faction menu (K by default) for **Start here** and **Help**. These pages keep their selected page when revisited. Buttons use Tab/Shift+Tab or arrow keys for selection and Enter/Space for activation; mouse clicks, the wheel and on-screen scroll arrows are also available. Descriptions stay below their actions. Action forms support Tab/Shift+Tab and Enter; Escape leaves a setup form for normal play.
+
+Successful faction creation, through either a command or its action form, starts optional guidance. The server opens the existing **Get a City Center** form, confirms delivery of the named flag, closes the form for world placement, then opens **Set Faction Home** only after accepted placement establishes a city. The small instruction panel stays at the top left during play; narrow action forms reserve space above their content. Successful home creation shows a brief completion message and clears the panel.
+
+**Resume faction setup** and **Dismiss guidance / Show guidance** are available in Start here and the Help topic list. Closing a form keeps the confirmed step. Dismissal is saved and never prevents normal play; reopening resumes the saved step without repeating delivery. Existing faction membership alone does not start guidance. Failed commands keep the form and its arguments, with the server's reason; resolve that reason and retry. During placement, a rejection keeps the flag and the placement instruction. Check the server's chat message for foundation, territory, dimension or protection restrictions.
+
+The initial delivery step and inventory are committed together in the existing UUID player snapshot. Repeated claims, reopened forms and reconnects cannot issue another setup flag while its placement is outstanding, including with survival recipes enabled. Find that flag in your inventory, storage or dropped items before trying to place it; the guide does not replace lost flags. Costs, rank checks, first-city capital designation and placement rules still come from the existing server handlers. No tutorial completion is required to play. Active visible setup and its completion message take priority over automatic daily-wheel openings; queued daily rewards remain available after completion or dismissal, and `/xdaily` still opens them manually.
+
+Guide state is the optional `FactionSetup` compound (`Faction` UUID, confirmed `Step`, and `Hidden`) under `ForgeData.PlayerPersisted.xfDailyRewards`. It uses the existing player save/load/clone path and atomic player-file replacement. Client intents only show, dismiss or resume; they cannot set progress or grant items. Accepted city/home world changes retain Minecraft's existing world-save behavior; the player and world files are not one crash-atomic transaction. Updated clients and servers must match for the extended onboarding snapshot. In-game layout at different scales, cancellation, reconnect/restart, full inventories, storage failures and dedicated-server operation still require runtime verification.
+
 ## 1. Join or create a faction
 
 Create a faction:

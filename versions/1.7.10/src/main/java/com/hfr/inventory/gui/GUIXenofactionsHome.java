@@ -1,22 +1,22 @@
 package com.hfr.inventory.gui;
 
 import com.hfr.client.earth.GuiXFEarthMap;
+import cpw.mods.fml.client.config.GuiButtonExt;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.gui.GuiButton;
-import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
 
 @SideOnly(Side.CLIENT)
-public final class GUIXenofactionsHome extends GuiScreen {
+public final class GUIXenofactionsHome extends XFListMenu {
     private static final String[] ACTIONS = {"map", "start", "actions", "help", "rewards"};
     public boolean doesGuiPauseGame() { return false; }
     public void initGui() {
         buttonList.clear();
         int w = Math.min(360, width - 20), x = (width - w) / 2;
         for (int i = 0; i < ACTIONS.length; i++)
-            buttonList.add(new GuiButton(i, x, 42 + i * 32, w, 18, I18n.format("xf.home." + ACTIONS[i])));
-        buttonList.add(new GuiButton(9, width / 2 - 60, height - 25, 120, 20, I18n.format("xf.nav.play")));
+            buttonList.add(new GuiButtonExt(i, x, 42 + i * 32, w, 18, I18n.format("xf.home." + ACTIONS[i])));
+        buttonList.add(new GuiButtonExt(9, width / 2 - 60, height - 25, 120, 20, I18n.format("xf.nav.play")));
     }
     protected void actionPerformed(GuiButton button) {
         switch (button.id) {
@@ -28,6 +28,7 @@ public final class GUIXenofactionsHome extends GuiScreen {
             default: mc.displayGuiScreen(null);
         }
     }
+    protected void back() { mc.displayGuiScreen(null); }
     public void drawScreen(int mx, int my, float ticks) {
         drawDefaultBackground();
         drawCenteredString(fontRendererObj, I18n.format("xf.home.title"), width / 2, 10, 0xffffff);

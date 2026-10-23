@@ -26,6 +26,7 @@ public final class XFLoginFlow {
         NetHandlerPlayClient current = mc.getNetHandler();
         if (current != connection || current == null) {
             connection = current; requested = resolved = mapPending = false; daily = null; dailyWorld = null;
+            XFFactionSetup.reset();
         }
         if (current == null || mc.thePlayer == null || mc.theWorld == null
                 || mc.currentScreen instanceof GuiDownloadTerrain) return;
@@ -36,7 +37,9 @@ public final class XFLoginFlow {
                     GUIXenofactionsTutorial.getFlagFile().exists() ? XFOnboardingPacket.LEGACY_DONE : XFOnboardingPacket.READY));
             PacketDispatcher.wrapper.sendToServer(com.hfr.packet.daily.DailyActionPacket.loginReady());
         }
-        if (!resolved || mc.currentScreen != null || mc.thePlayer.isDead) return;
+        if (!resolved || mc.thePlayer.isDead) return;
+        XFFactionSetup.tick();
+        if (XFFactionSetup.blocksAutomaticScreens() || mc.currentScreen != null) return;
         if (mapPending) {
             mapPending = false;
             mc.displayGuiScreen(new GuiXFEarthMap(null, true));

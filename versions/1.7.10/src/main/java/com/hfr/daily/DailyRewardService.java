@@ -120,6 +120,9 @@ public final class DailyRewardService {
     /** Persist per-player dismissal with the existing atomic native-player snapshot. */
     public static void onboarding(EntityPlayerMP player, int action) {
         if (!online(player)) return;
+        if (action >= com.hfr.packet.XFOnboardingPacket.HIDE_SETUP) {
+            com.hfr.clowder.FactionSetupGuide.intent(player, action); return;
+        }
         boolean show = false;
         try {
             NBTTagCompound saved = state(player);
@@ -136,8 +139,9 @@ public final class DailyRewardService {
             player.addChatMessage(new ChatComponentTranslation("xf.onboarding.save_failed"));
         }
         // Completion acknowledgements must not queue another opening, even if saving failed.
-        PacketDispatcher.wrapper.sendTo(new com.hfr.packet.XFOnboardingPacket.State(
-            action != com.hfr.packet.XFOnboardingPacket.COMPLETE && show), player);
+        com.hfr.clowder.FactionSetupGuide.sync(player,
+            action != com.hfr.packet.XFOnboardingPacket.COMPLETE && show,
+            action == com.hfr.packet.XFOnboardingPacket.READY || action == com.hfr.packet.XFOnboardingPacket.LEGACY_DONE);
     }
     /** Readiness is only a hint: loaded server state authorizes this once-per-login opening. */
     public static void loginReady(EntityPlayerMP player) {

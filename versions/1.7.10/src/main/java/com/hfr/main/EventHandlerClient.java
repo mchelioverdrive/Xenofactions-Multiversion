@@ -310,6 +310,8 @@ public class EventHandlerClient {
 			drawTDMHud();
 			GUIAdminEditor.drawSelectionPreview();
 			com.hfr.client.journeymap.ClientTDMMapOverlay.drawHud(event);
+			if (Minecraft.getMinecraft().currentScreen == null && !Minecraft.getMinecraft().gameSettings.hideGUI)
+				com.hfr.client.XFFactionSetup.draw(event.resolution.getScaledWidth(), event.resolution.getScaledHeight(), false, 0);
 		}
 
 		if(event.type == ElementType.CROSSHAIRS)

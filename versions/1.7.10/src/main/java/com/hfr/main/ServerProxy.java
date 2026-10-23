@@ -35,7 +35,7 @@ public class ServerProxy
 	public void receiveFactionFlagMetadata(INetHandler handler, String factionName, String hash) { }
 	public void receiveParticleEffect(INetHandler handler, PacketBuffer buffer) { }
     public void receiveDailyReward(INetHandler handler, NBTTagCompound data) { }
-    public void receiveOnboarding(INetHandler handler, boolean show) { }
+    public void receiveOnboarding(INetHandler handler, boolean show, int step, boolean hidden, boolean open, String feedback) { }
 	public void receiveClaimOverlay(long subscription, int dimension, int generation, int part, int parts, List<Claim> claims) { }
 	public void openWallArtGui(TileEntityWallImage tile) { }
 	public void openEarthMap() { }

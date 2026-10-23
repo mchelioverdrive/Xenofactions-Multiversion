@@ -66,7 +66,15 @@ public class ItemBlockCityCenter extends ItemBlock {
 
     @Override
     public boolean onItemUse(ItemStack stack, EntityPlayer player, World world, int x, int y, int z, int side, float hitX, float hitY, float hitZ) {
-        if(!CityCenterRelocationManager.isToken(stack)) return super.onItemUse(stack, player, world, x, y, z, side, hitX, hitY, hitZ);
+        if(!CityCenterRelocationManager.isToken(stack)) {
+            int before = stack.stackSize;
+            boolean placed = super.onItemUse(stack, player, world, x, y, z, side, hitX, hitY, hitZ);
+            // Queue confirmation after consumption, outside block/faction rollback. Saving waits
+            // until Forge finalizes inventory bookkeeping, including creative-mode restoration.
+            // ItemBlock.onItemUse also returns true when placeBlockAt rejects; consumption proves acceptance.
+            if (!world.isRemote && stack.stackSize < before) com.hfr.clowder.FactionSetupGuide.cityFounded(player);
+            return placed;
+        }
         Block clicked=world.getBlock(x,y,z);
         if(!clicked.isReplaceable(world,x,y,z)) {
             if(side==0)y--; else if(side==1)y++; else if(side==2)z--; else if(side==3)z++; else if(side==4)x--; else if(side==5)x++;

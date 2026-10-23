@@ -2,60 +2,73 @@ package com.hfr.inventory.gui;
 
 import java.util.List;
 import com.hfr.client.XFLoginFlow;
+import com.hfr.client.XFFactionSetup;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.gui.*;
 import net.minecraft.client.resources.I18n;
 
-/** Optional reference pages, paginated after wrapping at the current GUI scale. */
+/** Optional reference pages, wrapped and paginated at the current GUI scale. */
 @SideOnly(Side.CLIENT)
-public final class GUIXFHelp extends GuiScreen implements GuiYesNoCallback {
+public final class GUIXFHelp extends XFListMenu implements GuiYesNoCallback {
     private static final String[] TOPICS = {"map", "factions", "cities", "prestige", "safety", "menus"};
+    private static int rememberedTopic = -1, rememberedPage, rememberedRow;
     private final GuiScreen parent;
-    private int topic = -1, page;
-    public GUIXFHelp(GuiScreen parent) { this.parent = parent; }
-    public boolean doesGuiPauseGame() { return false; }
-    private int capacity() { return Math.max(1, (height - 90) / 12); }
-    private List<String> lines() { return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.help." + TOPICS[topic] + ".body").replace("\\n","\n"), Math.min(440, width - 28)); }
+    private int topic = rememberedTopic, page = rememberedPage;
+    public GUIXFHelp(GuiScreen parent) { this.parent = parent; firstRow = rememberedRow; }
+    private int capacity() { return Math.max(1, (height - 106) / 12); }
+    private List<String> lines() { return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.help." + TOPICS[topic] + ".body").replace("\\n","\n"), contentWidth() - 8); }
     public void initGui() {
-        buttonList.clear();
-        int w = Math.min(440, width - 20), x = (width - w) / 2;
+        beginList(36, height - 36);
+        int x = left(), w = contentWidth();
         if (topic < 0) {
-            for (int i = 0; i < TOPICS.length; i++) buttonList.add(new GuiButton(10 + i, x, 39 + i * 23, w, 20,
-                    I18n.format("xf.help." + TOPICS[i])));
-            buttonList.add(new GuiButton(3, x, 180, w, 20, I18n.format("xf.menu.reset_tutorial")));
+            for (int i = 0; i < TOPICS.length; i++) row(10 + i, I18n.format("xf.help." + TOPICS[i]), "");
+            if (XFFactionSetup.active()) {
+                row(5, I18n.format("xf.setup.resume"), "");
+                row(6, I18n.format(XFFactionSetup.hidden() ? "xf.setup.show" : "xf.setup.hide"), "");
+            }
+            row(3, I18n.format("xf.menu.reset_tutorial"), "");
         } else {
             page = Math.min(page, Math.max(0, (lines().size() - 1) / capacity()));
-            GuiButton prev = new GuiButton(1, x, height - 50, 70, 20, I18n.format("xf.tutorial.back"));
-            GuiButton next = new GuiButton(2, x + w - 70, height - 50, 70, 20, I18n.format("xf.tutorial.next"));
-            prev.enabled = page > 0; next.enabled = (page + 1) * capacity() < lines().size();
-            buttonList.add(prev); buttonList.add(next);
+            button(1, x, height - 59, 88, 26, I18n.format("xf.tutorial.back")).enabled = page > 0;
+            button(2, x + w - 88, height - 59, 88, 26, I18n.format("xf.tutorial.next")).enabled = (page + 1) * capacity() < lines().size();
             if (topic == 0 && parent instanceof com.hfr.client.earth.GuiXFEarthMap)
-                buttonList.add(new GuiButton(4,x,height-25,80,20,I18n.format("xf.map.sources")));
+                button(4, width / 2 - 40, height - 29, 80, 26, I18n.format("xf.map.sources"));
         }
-        buttonList.add(new GuiButton(0, width / 2 - 50, height - 25, 100, 20, I18n.format("xf.nav.back")));
+        button(0, x, height - 29, 90, 26, I18n.format("xf.nav.back"));
+        button(7, x + w - 90, height - 29, 90, 26, I18n.format("xf.nav.play"));
+        finishList();
     }
     protected void actionPerformed(GuiButton b) {
+        if (scrollButton(b)) return;
         if (b.id >= 10) { topic = b.id - 10; page = 0; initGui(); }
         else if (b.id == 0) back();
         else if (b.id == 3) mc.displayGuiScreen(new GuiYesNo(this, I18n.format("xf.confirm.reset_tutorial"), I18n.format("xf.help.replay"), 3));
         else if (b.id == 4) ((com.hfr.client.earth.GuiXFEarthMap)parent).showInfo(this);
+        else if (b.id == 5) XFFactionSetup.resume();
+        else if (b.id == 6) XFFactionSetup.toggle();
+        else if (b.id == 7) mc.displayGuiScreen(null);
         else { page += b.id == 1 ? -1 : 1; initGui(); }
+    }
+    protected void scroll(int delta) {
+        if (topic < 0) super.scroll(delta);
+        else { page = Math.max(0, Math.min((lines().size() - 1) / capacity(), page + delta)); initGui(); }
     }
     public void confirmClicked(boolean ok, int id) {
         if (ok) { XFLoginFlow.replay(); mc.displayGuiScreen(null); }
         else mc.displayGuiScreen(this);
     }
-    private void back() { if (topic >= 0) { topic = -1; page = 0; initGui(); } else mc.displayGuiScreen(parent); }
-    protected void keyTyped(char c, int key) { if (key == 1) back(); }
+    protected void back() { if (topic >= 0) { topic = -1; page = 0; initGui(); } else mc.displayGuiScreen(parent); }
+    public void onGuiClosed() { rememberedTopic = topic; rememberedPage = page; rememberedRow = firstRow; super.onGuiClosed(); }
+    public void updateScreen() { if (XFFactionSetup.consumeMenuRefresh()) initGui(); }
     public void drawScreen(int mx, int my, float ticks) {
         drawDefaultBackground();
         drawCenteredString(fontRendererObj, I18n.format(topic < 0 ? "xf.home.help" : "xf.help." + TOPICS[topic]), width / 2, 12, 0xffffff);
         if (topic >= 0) {
-            List<String> text = lines(); int x = (width - Math.min(440, width - 28)) / 2;
+            List<String> text = lines();
             for (int i = page * capacity(), y = 38; i < Math.min(text.size(), (page + 1) * capacity()); i++, y += 12)
-                drawString(fontRendererObj, text.get(i), x, y, 0xdddddd);
-            drawCenteredString(fontRendererObj, (page + 1) + "/" + Math.max(1, (text.size() + capacity() - 1) / capacity()), width / 2, height - 44, 0xaaaaaa);
+                drawString(fontRendererObj, text.get(i), left() + 4, y, 0xdddddd);
+            drawCenteredString(fontRendererObj, (page + 1) + "/" + Math.max(1, (text.size() + capacity() - 1) / capacity()), width / 2, height - 50, 0xaaaaaa);
         }
         super.drawScreen(mx, my, ticks);
     }

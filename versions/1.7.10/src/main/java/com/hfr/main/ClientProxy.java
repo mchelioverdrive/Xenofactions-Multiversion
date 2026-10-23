@@ -117,11 +117,13 @@ public class ClientProxy extends ServerProxy
         } });
     }
 
-    @Override public void receiveOnboarding(final INetHandler handler, final boolean show) {
+    @Override public void receiveOnboarding(final INetHandler handler, final boolean show, final int step, final boolean hidden, final boolean open, final String feedback) {
         final Minecraft mc = Minecraft.getMinecraft();
         mc.func_152344_a(() -> {
-            if (mc.getNetHandler() == handler && mc.thePlayer != null && mc.theWorld != null)
+            if (mc.getNetHandler() == handler && mc.thePlayer != null && mc.theWorld != null) {
                 com.hfr.client.XFLoginFlow.state(show);
+                com.hfr.client.XFFactionSetup.receive(step, hidden, open, feedback);
+            }
         });
     }
 	@Override public com.hfr.world.earth.XFEarthProfile getEarthHeightProfile(World world) {
