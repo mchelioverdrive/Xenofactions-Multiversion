@@ -100,6 +100,8 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
             int[] p = state.getIntArray("Plan"), target = state.getIntArray("Target");
             if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
+            if ("locations".equals(state.getString("AccessStage")))
+                detail(lines,I18n.format("xf.miner.access_columns",state.getInteger("AccessColumnsChecked"),state.getInteger("AccessColumns")));
             if (state.getInteger("AccessProposals") > 0)
                 detail(lines,I18n.format("xf.miner.access_proposal",state.getInteger("AccessProposal"),state.getInteger("AccessProposals"),state.getInteger("AccessEndpointsRemaining")));
             if (!state.getString("AccessStage").isEmpty())
