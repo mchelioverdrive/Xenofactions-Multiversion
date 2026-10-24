@@ -122,8 +122,14 @@ public final class GUIMinerNPC extends GuiContainer {
             }
             if (recoveryStart.length != 3 && !state.getString("NavigationReason").isEmpty()) {
                 detail(lines,I18n.format("xf.miner.nav."+state.getString("NavigationReason")));
-                if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
+                if (!state.getString("ArrivalFailure").isEmpty()) detail(lines,I18n.format("xf.miner.arrival",I18n.format("xf.miner.nav."+state.getString("ArrivalFailure"))));
+                detail(lines,I18n.format("xf.miner.actual",state.getString("ActualPosition")));
             }
+            int[] standing = state.getIntArray("StandingPosition"), access = state.getIntArray("AccessDestination");
+            int[] entrance = state.getIntArray("Entrance");
+            if (entrance.length == 3) detail(lines,I18n.format("xf.miner.entrance",coord(entrance[0],entrance[1],entrance[2])));
+            if (standing.length == 3) detail(lines,I18n.format("xf.miner.standing_position",coord(standing[0],standing[1],standing[2])));
+            if (state.getBoolean("BuildingAccess") && access.length == 3) detail(lines,I18n.format("xf.miner.access_destination",coord(access[0],access[1],access[2])));
             int[] dest = state.getIntArray("Destination"), waypoint = state.getIntArray("Waypoint");
             if (dest.length == 3) detail(lines,I18n.format("xf.miner.destination",coord(dest[0],dest[1],dest[2])));
             if (waypoint.length == 3) detail(lines,I18n.format("xf.miner.waypoint",coord(waypoint[0],waypoint[1],waypoint[2])));
@@ -131,7 +137,9 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,I18n.format("xf.miner.requests"));
             if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
             if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
-            if (tools == 0 && lights == 0) detail(lines,I18n.format("xf.miner.no_requests"));
+            int blocks = state.getInteger("BlocksRequested"), ladders = state.getInteger("LaddersRequested");
+            if (blocks > 0 || ladders > 0) detail(lines,I18n.format("xf.miner.need_access",blocks,ladders));
+            if (tools == 0 && lights == 0 && blocks == 0 && ladders == 0) detail(lines,I18n.format("xf.miner.no_requests"));
             detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
             if (!"none".equals(state.getString("StorageReason")))
                 detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));

@@ -53,7 +53,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         Task(String key) { this.key = key; }
     }
     private enum StorageReason {
-        NONE("none"), CAPACITY("capacity"), OVERFLOW("overflow"), TOOL("tool"), TORCHES("torches"), COMPLETE("complete");
+        NONE("none"), CAPACITY("capacity"), OVERFLOW("overflow"), TOOL("tool"), TORCHES("torches"), ACCESS("access"), COMPLETE("complete");
         final String key;
         StorageReason(String key) { this.key = key; }
     }
@@ -84,7 +84,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private double bestRouteProgress;
     private String navigationReason = "";
     private String navigationDetail = "";
-    // A helix of original terrain remains until the final bottom-up pass. Never place free blocks.
+    // A helix of original terrain remains until the final bottom-up pass.
     private boolean accessRamp;
     private int rampOffset, rampCleanup = -1;
     private final java.util.BitSet rejectedTargets = new java.util.BitSet();
@@ -103,6 +103,26 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private final java.util.List<ItemStack> overflowDrops = new java.util.ArrayList<ItemStack>();
     private String capacityDetail = "";
     private int returnFailureTarget = -1, returnFailures;
+    private enum Movement { WALK, STEP, DESCEND, CLIMB }
+    private int[] preciseGoal, interactionTarget, selectedEndpoint, plannedEntrance;
+    private Block interactionBlock;
+    private int interactionMeta;
+    private boolean interactionMining;
+    private final java.util.Set<Long> failedEndpoints = new java.util.HashSet<Long>();
+    private String arrivalFailure = "";
+    // Hypothetical access exists only during planning; no world edits or inventory changes there.
+    private final java.util.Map<Long,int[]> proposedAccess = new java.util.HashMap<Long,int[]>();
+    // x,y,z, ladder metadata (0 = supplied full support block). Saved for repair/reservation.
+    private final List<int[]> accessBlocks = new java.util.ArrayList<int[]>();
+    private final List<int[]> accessPlan = new java.util.ArrayList<int[]>();
+    private int accessIndex, accessAttempts, requestedBlocks, requestedLadders;
+    private boolean buildingAccess;
+    private int[] accessDestination;
+    private boolean accessSupplyChecked, accessStationReachable = true;
+    private boolean resumeStorageAfterAccess;
+    private StorageReason accessStorageReason = StorageReason.NONE;
+    private java.util.Map<Long,Double> searchHeights;
+    private int searchRemovedX, searchRemovedY, searchRemovedZ;
 
     public EntityFactionMiner(World world) {
         super(world); setSize(.6F, 1.8F); stepHeight = 1F;
@@ -147,6 +167,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private void resetPath() {
         getNavigator().clearPathEntity(); pathTicks = 0;
+        preciseGoal = null;
         destination = waypoint = null; navigationFailures = 0; resetMining();
         travelRoute.clear(); routeIndex = segmentEnd = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
         recoveringCorridor = false; recoveryOrigin = recoveryDestination = null; recoveryRoute.clear();
@@ -201,7 +222,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 + " installed=" + Arrays.toString(plan));
     }
     private void resetMining() { miningProgress = 0; miningBlock = null; miningTool = null; }
-    private void clearRequests() { requestedTools = requestedTorches = supplyCheckTicks = 0; }
+    private void clearRequests() { requestedTools = requestedTorches = requestedBlocks = requestedLadders = supplyCheckTicks = 0; }
     private String validate(int[] next, boolean area) {
         if (!stationAssigned) return "xf.miner.no_chest";
         if (jobDimension != dimension) return "xf.miner.state.dimension";
@@ -239,6 +260,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         pause(); plan = next; cursor = 0; configured = true; task = Task.TO_WORK; storageReason = StorageReason.NONE;
         targetCursor = -1; searchOffset = 0;
         rejectedTargets.clear(); returnRoute.clear();
+        accessPlan.clear(); accessBlocks.clear(); buildingAccess = false; accessDestination = null; accessAttempts = 0;
+        resumeStorageAfterAccess = false; accessStorageReason = StorageReason.NONE; accessSupplyChecked = false;
         requiredHarvest = -1; needsLight = false; toolBroken = false;
         accessRamp = plan[5] > plan[3] && plan[6] > plan[4] && plan[7] > plan[8];
         rampCleanup = accessRamp ? plan[7]-plan[8] : -1;
@@ -296,6 +319,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
         if (!running) {
             running = true; status = "working"; resetPath();
+            failedEndpoints.clear(); accessAttempts = 0; accessSupplyChecked = false; arrivalFailure = "";
             navigationReason = navigationDetail = "";
             rejectedTargets.clear(); returnFailures = 0; returnFailureTarget = -1;
             searchOffset = 0;
@@ -306,16 +330,26 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return new Activation("");
     }
     public void onLivingUpdate() {
+        if (!worldObj.isRemote && running && !recoveringCorridor && interactionTarget != null
+                && worldObj.blockExists(interactionTarget[0],interactionTarget[1]-(interactionMining ? 1 : 0),interactionTarget[2])) {
+            int ty = interactionTarget[1]-(interactionMining ? 1 : 0);
+            if (worldObj.getBlock(interactionTarget[0],ty,interactionTarget[2]) != interactionBlock
+                    || worldObj.getBlockMetadata(interactionTarget[0],ty,interactionTarget[2]) != interactionMeta) {
+                travelRoute.clear(); preciseGoal = null; getNavigator().clearPathEntity();
+                navigationReason = "target"; navigationDetail = endpointDiagnostic("target");
+            }
+        }
         if (!worldObj.isRemote && running && configured && !recoveringCorridor
                 && !inCorridor((int)Math.floor(posX),(int)Math.floor(posZ))) beginCorridorRecovery();
         // Native following checks neighboring cells while shortcutting. Do not let those checks
         // discover unloaded chunks even though our planned route itself only uses loaded cells.
-        if (!worldObj.isRemote && !getNavigator().noPath() && waypoint != null && !segmentChunksLoaded(waypoint)) {
+        if (!worldObj.isRemote && (!getNavigator().noPath() || preciseGoal != null) && waypoint != null && !segmentChunksLoaded(waypoint)) {
+            preciseGoal = null; motionX = motionZ = 0;
             getNavigator().clearPathEntity(); status = recoveringCorridor ? "corridor_recovery" : "chunk";
             navigationReason = "chunk"; pathTicks = 0;
         }
         if (!worldObj.isRemote && !recoveringCorridor && !getNavigator().noPath() && destination != null
-                && atDestination(destination[0],destination[1],destination[2],task == Task.TO_WORK && pendingDrops == null))
+                && atDestination(destination[0],destination[1],destination[2],interactionMining))
             arrived();
         super.onLivingUpdate();
         if (worldObj.isRemote || !running || ticksExisted % 10 != 0) return;
@@ -339,6 +373,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (recoverCorridor()) return;
         equipCarriedTool();
         stockTorchesFromCargo();
+        // Repair an exit before tool/capacity trips can demand that same broken exit.
+        if (buildingAccess && !storageTask()) { constructAccess(); return; }
         if (suitable(getHeldItem())) requestedTools = 0;
         if (torchCount() > 0) { requestedTorches = 0; needsLight = false; }
         if ((task == Task.TO_STORAGE || task == Task.RESTOCKING && !hasCargo())
@@ -356,6 +392,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             else if ((cursor < totalWork() || rampCleanup >= 0) && needsLight && torchCount() == 0) beginStorage(StorageReason.TORCHES);
         }
         if (storageTask()) { visitChest(); return; }
+        if (buildingAccess) { constructAccess(); return; }
         if (pendingDrops != null) {
             int x = pendingDrops[0], y = pendingDrops[1], z = pendingDrops[2];
             if (!worldObj.blockExists(x, y, z)) { status = "chunk"; return; }
@@ -375,7 +412,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             int x = plan[3] + workCursor % width, z = plan[4] + workCursor / width % length, y = plan[7] - workCursor / layer;
             if (!worldObj.blockExists(x, y, z)) { status = "chunk"; return; }
             Block block = worldObj.getBlock(x, y, z);
-            if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch) { advance(workCursor); continue; }
+            if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch || reservedAccess(x,y,z)) { advance(workCursor); continue; }
             if (!cleanup && accessRamp && workCursor == rampCursor(workCursor / layer)) { advance(workCursor); continue; }
             if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) { stop("denied"); return; }
             if (block == net.minecraft.init.Blocks.bedrock || block.getBlockHardness(worldObj, x, y, z) < 0) {
@@ -405,6 +442,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             }
             if (!ensureReturnRoute(x,y,z)) {
                 if ("chunk".equals(status)) return;
+                if (planAccess(x,y+1,z)) return;
                 if (returnFailureTarget != workCursor) { returnFailureTarget = workCursor; returnFailures = 0; }
                 if (++returnFailures < 3) { status = "recovering"; return; }
                 if (cleanup) terminalNavigation();
@@ -438,7 +476,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             }
             miningProgress = 0; miningBlock = null;
             if (!harvested) { stop("harvest_denied"); return; }
-            rejectedTargets.clear();
+            rejectedTargets.clear(); accessAttempts = 0;
             boolean collected = collectDrops(x, y, z);
             if (!collected) { pendingDrops = new int[] {x, y, z}; pendingDropsCaptured = true; }
             advance(workCursor);
@@ -497,7 +535,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         for (int scans = 0; scans < 64 && cursor + searchOffset < end; scans++, searchOffset++) {
             int candidate = cursor + searchOffset;
             int x = plan[3] + candidate % width, z = plan[4] + candidate / width % (plan[6] - plan[4] + 1), y = plan[7] - candidate / layer;
-            if (rejectedTargets.get(candidate) || accessRamp && candidate == rampCursor(candidate/layer)) continue;
+            if (rejectedTargets.get(candidate) || accessRamp && candidate == rampCursor(candidate/layer) || reservedAccess(x,y,z)) continue;
             if (!worldObj.blockExists(x, y, z)) { searchUnloaded = true; continue; }
             Block block = worldObj.getBlock(x, y, z);
             if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch || block.getMaterial().isLiquid()
@@ -505,7 +543,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     || !WorkerAccess.ownsLand(worldObj, x, z, factionId) || BuilderPlacement.protectedBlock(worldObj, x, y, z)) continue;
             status = "searching";
             // A block may be approachable without already being within harvesting reach.
-            if (standingCandidates(x,y+1,z,true).isEmpty()) continue;
+            // Missing standing positions may be repairable with supplied access. Let the
+            // authoritative route/construction planner decide, rather than rejecting here.
             targetCursor = candidate; searchOffset = 0; resetPath(); status = "working"; return true;
         }
         if (cursor + searchOffset >= end) {
@@ -530,15 +569,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void beginCorridorRecovery() {
         // Retain task, storage reason, interaction destination and all job/item state.
         getNavigator().clearPathEntity(); travelRoute.clear(); recoveryRoute.clear(); waypoint = null;
+        preciseGoal = null;
         pathTicks = navigationFailures = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
-        recoveryOrigin = new int[] {(int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.1),(int)Math.floor(posZ)};
+        recoveryOrigin = new int[] {(int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.001),(int)Math.floor(posZ)};
         recoveryDestination = null; recoveryAttempts = recoveryTicks = 0; recoveringCorridor = true;
         resetMining(); status = "corridor_recovery";
         navigationReason = "outside"; navigationDetail = "Recovery origin=" + Arrays.toString(recoveryOrigin);
     }
     /** Returns true while recovery owns movement, including the tick that finishes or stops it. */
     private boolean recoverCorridor() {
-        int x = (int)Math.floor(posX), y = (int)Math.floor(boundingBox.minY+.1), z = (int)Math.floor(posZ);
+        int x = (int)Math.floor(posX), y = (int)Math.floor(boundingBox.minY+.001), z = (int)Math.floor(posZ);
         if (!recoveringCorridor) {
             if (inCorridor(x,z)) return false;
             beginCorridorRecovery();
@@ -549,9 +589,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             navigationDetail = "Fixed recovery boundary/time limit; origin=" + Arrays.toString(recoveryOrigin);
             terminalNavigation(); return true;
         }
-        if (onGround && inCorridor(x,z) && recoveryStanding(x,y,z)) {
+        if ((onGround || isOnLadder()) && inCorridor(x,z) && recoveryStanding(x,y,z)) {
             // Clear only temporary movement. The next work tick resumes the interrupted task.
             getNavigator().clearPathEntity(); recoveryRoute.clear(); travelRoute.clear(); waypoint = null;
+            preciseGoal = null;
             recoveringCorridor = false; recoveryOrigin = recoveryDestination = null;
             pathTicks = navigationFailures = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
             navigationReason = navigationDetail = ""; status = task.key; supplyCheckTicks = 0;
@@ -569,13 +610,93 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private boolean moveNear(int x, int y, int z) {
         return moveNear(x,y,z,false);
     }
+    private boolean finalApproachClear(int[] end) {
+        double ey = nodeY(end);
+        if (Double.isNaN(ey) || Math.abs(ey-boundingBox.minY) > .1) return false;
+        for (int i = 0; i <= 8; i++) {
+            double t = i/8.0, px = posX+(end[0]+.5-posX)*t, pz = posZ+(end[2]+.5-posZ)*t;
+            if (!clearBody(px,ey,pz,-30000001,-1,0)) return false;
+            if (!ladder((int)Math.floor(px),(int)Math.floor(ey),(int)Math.floor(pz),-30000001,-1,0)) {
+                AxisAlignedBB sole = AxisAlignedBB.getBoundingBox(px-width/2,ey-.06,pz-width/2,px+width/2,ey+.001,pz+width/2);
+                if (!collisions(sole,-30000001,-1,0,recoveryCollisions,false) || recoveryCollisions.isEmpty()) return false;
+            }
+        }
+        return true;
+    }
+    /** PathNavigate cannot advance ladders in 1.7.10. Drive accepted special edges through
+     * the ordinary living collision/step/Forge-ladder physics, on the owning world thread. */
+    @Override public void moveEntityWithHeading(float strafe,float forward) {
+        if (!worldObj.isRemote && running && preciseGoal != null && segmentChunksLoaded(preciseGoal)) {
+            double fy = nodeY(preciseGoal);
+            if (!Double.isNaN(fy)) {
+                double dx = preciseGoal[0]+.5-posX, dz = preciseGoal[2]+.5-posZ;
+                // Finish the last fraction with real collision-resolved motion. An
+                // asymptotic steering factor cannot execute an exactly-on-reach endpoint.
+                double distance = Math.sqrt(dx*dx+dz*dz), scale = distance > .12 ? .12/distance : 1;
+                motionX = dx*scale; motionZ = dz*scale;
+                if (isOnLadder()) {
+                    double dy = fy+(ladder(preciseGoal[0],preciseGoal[1],preciseGoal[2],-30000001,-1,0) ? 0 : .08)-boundingBox.minY;
+                    motionY = Math.abs(dy) < .01 ? 0 : dy > 0 ? Math.max(.08,Math.min(.12,dy*.4)) : Math.min(-.08,Math.max(-.12,dy*.4));
+                }
+                super.moveEntityWithHeading(0,0); return;
+            }
+            preciseGoal = null;
+        }
+        if (!worldObj.isRemote && running && preciseGoal == null && (travelRoute.isEmpty() && recoveryRoute.isEmpty() || "chunk".equals(navigationReason))
+                && getNavigator().noPath() && isOnLadder()) { motionX = motionY = motionZ = 0; }
+        super.moveEntityWithHeading(strafe,forward);
+    }
     private boolean atDestination(int x,int y,int z,boolean mining) {
-        if (!onGround || getDistanceSq(x+.5,y,z+.5) > 9 || mining && cursor >= totalWork() && posY <= y+.5) return false;
-        int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.1), pz = (int)Math.floor(posZ);
-        return inCorridor(px,pz) && standing(px,py,pz,mining ? x : -30000001,mining ? y-1 : -1,z) && (!mining || visible(x,y-1,z));
+        arrivalFailure = interactionFailure(posX,boundingBox.minY,posZ,x,y,z,mining,true);
+        return arrivalFailure.isEmpty();
+    }
+    private String interactionFailure(double px,double py,double pz,int x,int y,int z,boolean mining,boolean actual) {
+        if (!inCorridor((int)Math.floor(px),(int)Math.floor(pz))) return "outside";
+        if (!worldObj.blockExists(x,mining ? y-1 : y,z)) return "chunk";
+        if (mining && actual && interactionTarget != null && Arrays.equals(interactionTarget,new int[] {x,y,z})
+                && (worldObj.getBlock(x,y-1,z) != interactionBlock || worldObj.getBlockMetadata(x,y-1,z) != interactionMeta)) return "target";
+        if (Double.isNaN(py)) return "footing";
+        if (Math.abs(py-y) > 3) return "elevation";
+        if ((px-x-.5)*(px-x-.5)+(py-y)*(py-y)+(pz-z-.5)*(pz-z-.5) > 9) return "reach";
+        int rx = mining ? x : -30000001, ry = mining ? y-1 : -1;
+        if (!clearBody(px,py,pz,rx,ry,z) || !clearBody(px,py,pz,-30000001,-1,0)) return "clearance";
+        boolean climb = ladder((int)Math.floor(px),(int)Math.floor(py),(int)Math.floor(pz),rx,ry,z);
+        if (!climb) {
+            AxisAlignedBB sole = AxisAlignedBB.getBoundingBox(px-width/2,py-.06,pz-width/2,px+width/2,py+.001,pz+width/2);
+            if (!collisions(sole,rx,ry,z,recoveryCollisions,false)) return "chunk";
+            boolean support = false;
+            for (AxisAlignedBB shape : recoveryCollisions) if (Math.abs(shape.maxY-py) <= .06) { support = true; break; }
+            if (!support) return "footing";
+        }
+        if (actual && !onGround && !climb) return "movement";
+        if (mining && !sight(px,py+getEyeHeight(),pz,x,y-1,z)) return "sight";
+        if (!mining && !sight(px,py+getEyeHeight(),pz,x,y,z)) return "sight";
+        return "";
+    }
+    private void rememberInteraction(int x,int y,int z,boolean mining) {
+        Block block = mining ? worldObj.getBlock(x,y-1,z) : worldObj.getBlock(x,y,z);
+        int meta = worldObj.getBlockMetadata(x,mining ? y-1 : y,z);
+        if (!Arrays.equals(interactionTarget,new int[] {x,y,z}) || interactionMining != mining || interactionBlock != block || interactionMeta != meta) {
+            interactionTarget = new int[] {x,y,z}; interactionBlock = block; interactionMeta = meta;
+            interactionMining = mining;
+            failedEndpoints.clear(); selectedEndpoint = null; preciseGoal = null;
+            plannedEntrance = null;
+            accessAttempts = 0;
+            travelRoute.clear(); getNavigator().clearPathEntity(); routeRetries = navigationFailures = 0;
+        }
+    }
+    private String endpointDiagnostic(String failure) {
+        return "arrival=" + failure + " task=" + task.key + " target=" + Arrays.toString(interactionTarget)
+                + " block=" + Block.blockRegistry.getNameForObject(interactionBlock) + ":" + interactionMeta
+                + " actual=" + posX+","+boundingBox.minY+","+posZ + " endpoint=" + Arrays.toString(selectedEndpoint)
+                + " distance=" + (destination == null ? -1 : Math.sqrt(getDistanceSq(destination[0]+.5,destination[1],destination[2]+.5)))
+                + " ground=" + onGround + " ladder=" + isOnLadder()
+                + " visible=" + (interactionTarget != null && sight(posX,boundingBox.minY+getEyeHeight(),posZ,
+                        interactionTarget[0],interactionTarget[1]-(interactionMining ? 1 : 0),interactionTarget[2]));
     }
     private void arrived() {
         getNavigator().clearPathEntity(); travelRoute.clear(); waypoint = null;
+        preciseGoal = null;
         pathTicks = navigationFailures = routeRetries = 0; navigationReason = navigationDetail = "";
     }
     private boolean moveNear(int x, int y, int z, boolean mining) {
@@ -587,13 +708,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int[] goal = new int[] {x,y,z};
         if (!recovery) {
             if (!Arrays.equals(destination,goal)) { resetPath(); destination = goal; }
+            rememberInteraction(x,y,z,mining);
             if (atDestination(x,y,z,mining)) { arrived(); return true; }
             if (task == Task.MINING || task == Task.DROPS) transition(Task.TO_WORK,"work position changed",goal);
             else if (storageTask() && task != Task.TO_STORAGE) transition(Task.TO_STORAGE,"station interaction position changed",goal);
         }
         String movingStatus = recovery ? "corridor_recovery" : task.key;
         resetMining();
-        if (!onGround) {
+        if (!onGround && !isOnLadder() && route.isEmpty()) {
             getNavigator().clearPathEntity(); pathTicks += 10; status = recovery ? movingStatus : "recovering";
             if (pathTicks >= 100) { navigationReason = "footing"; navigationDetail = "Start has no supported footing"; status = "route_failed"; }
             return false;
@@ -609,15 +731,20 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             int previous = routeIndex;
             for (int i = routeIndex+1; i <= segmentEnd && i < route.size(); i++) {
                 int[] next = route.get(i);
-                if (getDistanceSq(next[0]+.5,next[1],next[2]+.5) < .36) routeIndex = i;
+                double tolerance = movement(route.get(i-1),next) == Movement.CLIMB ? .04 : .36;
+                if (getDistanceSq(next[0]+.5,nodeY(next),next[2]+.5) < tolerance) routeIndex = i;
             }
             int[] next = route.get(Math.min(routeIndex+1,route.size()-1));
-            double progress = routeIndex-Math.min(1,Math.sqrt(getDistanceSq(next[0]+.5,next[1],next[2]+.5)));
+            if (!recovery) movingStatus = movement(route.get(routeIndex),next) == Movement.CLIMB ? "climbing"
+                    : movement(route.get(routeIndex),next) == Movement.DESCEND ? "descending"
+                    : movement(route.get(routeIndex),next) == Movement.STEP ? "stepping"
+                    : mining && (posX < plan[3] || posX > plan[5]+1 || posZ < plan[4] || posZ > plan[6]+1 || boundingBox.minY > y) ? "walking_rim" : task.key;
+            double progress = routeIndex-Math.min(1,Math.sqrt(getDistanceSq(next[0]+.5,nodeY(next),next[2]+.5)));
             if (progress > bestRouteProgress+.1) { bestRouteProgress = progress; pathTicks = 0; }
             else pathTicks += 10;
             if (routeIndex > previous) navigationFailures = 0;
             boolean intact = routeIntact(route,routeIndex,Math.min(route.size()-1,routeIndex+8),
-                    mining ? x : -30000001,mining ? y-1 : -1,z,recovery);
+                    -30000001,-1,0,recovery);
             if (!intact || getDistanceSq(next[0]+.5,next[1],next[2]+.5) > 16 || pathTicks >= 100) {
                 navigationReason = intact ? "stalled" : "path";
                 if (!intact) for (int i = routeIndex; i <= Math.min(route.size()-1,routeIndex+8); i++) {
@@ -628,28 +755,48 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 }
                 navigationDetail = "Route stopped at step " + routeIndex + "/" + (route.size()-1)
                         + "; next=" + Arrays.toString(next) + (intact ? "; no forward route progress" : "; footing/headroom changed");
-                getNavigator().clearPathEntity(); route.clear(); routeRetries++; pathTicks = 0;
+                if (!recovery && selectedEndpoint != null && failedEndpoints.size() < 64)
+                    failedEndpoints.add(positionKey(selectedEndpoint[0],selectedEndpoint[1],selectedEndpoint[2]));
+                getNavigator().clearPathEntity(); preciseGoal = null; route.clear(); routeRetries++; pathTicks = 0;
+            } else if (preciseGoal != null && getDistanceSq(preciseGoal[0]+.5,nodeY(preciseGoal),preciseGoal[2]+.5) > .0125) {
+                status = movement(route.get(routeIndex),preciseGoal) == Movement.CLIMB ? "climbing" : "final_approach"; return false;
             } else if (!getNavigator().noPath()) { status = movingStatus; return false; }
             else if (routeIndex+1 >= route.size()) {
                 // A valid path endpoint is still not arrival unless the interaction check above succeeds.
-                navigationReason = "standing"; navigationDetail = "Route endpoint no longer permits interaction";
-                route.clear(); routeRetries++;
+                atDestination(x,y,z,mining);
+                navigationReason = arrivalFailure; navigationDetail = endpointDiagnostic(arrivalFailure);
+                int[] end = route.get(route.size()-1);
+                if (!recovery && preciseGoal == null && ("reach".equals(arrivalFailure) || "sight".equals(arrivalFailure) || "footing".equals(arrivalFailure))
+                        && interactionFailure(end[0]+.5,nodeY(end),end[2]+.5,x,y,z,mining,false).isEmpty()
+                        && finalApproachClear(end)) {
+                    preciseGoal = end; status = "final_approach"; return false;
+                }
+                if (!recovery && failedEndpoints.size() < 64) failedEndpoints.add(positionKey(end[0],end[1],end[2]));
+                preciseGoal = null; route.clear(); routeRetries++;
             }
         }
         if (routeRetries >= 4 || navigationFailures >= 3) { status = "route_failed"; return false; }
         if (route.isEmpty()) {
             if (recovery && recoveryAttempts >= RECOVERY_ATTEMPTS) { status = "route_failed"; return false; }
             List<int[]> goals = recovery ? java.util.Collections.<int[]>emptyList() : standingCandidates(x,y,z,mining);
-            if (!recovery && goals.isEmpty()) { navigationReason = "standing"; navigationDetail = standingObstruction(x,y,z); }
+            if (!recovery && goals.isEmpty()) {
+                navigationReason = failedEndpoints.isEmpty() ? "standing" : arrivalFailure;
+                navigationDetail = failedEndpoints.isEmpty() ? standingObstruction(x,y,z) : endpointDiagnostic(arrivalFailure);
+            }
             else {
                 // Search complete routes first, including direct approaches; a verified cached
                 // route remains a safe fallback when the bounded search cannot rediscover it.
                 if (recovery) recoveryAttempts++;
-                List<int[]> found = searchRoute(goals,mining ? x : -30000001,mining ? y-1 : -1,z,recovery);
-                if (found == null && !recovery) found = cachedTravel(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
+                List<int[]> found = recovery ? searchRoute(goals,-30000001,-1,z,true) : executableRoute(goals,x,y,z,mining);
                 if (found != null && !found.isEmpty()) {
                     route.addAll(found); routeIndex = segmentEnd = 0;
                     if (recovery) recoveryDestination = found.get(found.size()-1).clone();
+                    else {
+                        selectedEndpoint = found.get(found.size()-1).clone(); plannedEntrance = null;
+                        for (int i = 1; i < found.size(); i++) if (nodeY(found.get(i)) < nodeY(found.get(i-1))-.01) {
+                            plannedEntrance = found.get(i).clone(); break;
+                        }
+                    }
                     bestRouteProgress = -Double.MAX_VALUE; pathTicks = 0;
                 }
             }
@@ -658,6 +805,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     status = recoveryAttempts >= RECOVERY_ATTEMPTS || "footing".equals(navigationReason) ? "route_failed" : movingStatus;
                     return false;
                 }
+                if (mining && !buildingAccess && planAccess(x,y,z)) return false;
+                if (!failedEndpoints.isEmpty()) navigationDetail += "; " + endpointDiagnostic(arrivalFailure);
                 if (!"chunk".equals(status)) { navigationFailures++; status = navigationFailures >= 3 ? "route_failed" : "recovering"; }
                 return false;
             }
@@ -668,9 +817,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         segmentEnd = Math.min(routeIndex+1,route.size()-1);
         int[] from = route.get(routeIndex), first = route.get(segmentEnd);
         int dx = first[0]-from[0], dz = first[2]-from[2];
-        if (segmentEnd > routeIndex && first[1] == from[1]) while (segmentEnd+1 < route.size() && segmentEnd-routeIndex < 6) {
+        Movement kind = movement(from,first);
+        if (kind == Movement.CLIMB || kind == Movement.DESCEND || nodeY(first) != first[1] || nodeY(from) != from[1]) {
+            getNavigator().clearPathEntity(); preciseGoal = first; waypoint = first.clone();
+            status = kind == Movement.CLIMB ? "climbing" : kind == Movement.DESCEND ? "descending" : "stepping";
+            return false;
+        }
+        preciseGoal = null;
+        if (segmentEnd > routeIndex && kind == Movement.WALK) while (segmentEnd+1 < route.size() && segmentEnd-routeIndex < 6) {
             int[] a = route.get(segmentEnd), b = route.get(segmentEnd+1);
-            if (b[1] != a[1] || b[0]-a[0] != dx || b[2]-a[2] != dz) break;
+            if (movement(a,b) != Movement.WALK || nodeY(b) != b[1] || b[0]-a[0] != dx || b[2]-a[2] != dz) break;
             segmentEnd++;
         }
         PathPoint[] points = new PathPoint[segmentEnd-routeIndex+1];
@@ -685,7 +841,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             navigationReason = "path"; navigationDetail = "Navigator rejected verified route segment";
             route.clear(); navigationFailures++; status = recovery ? movingStatus : "recovering"; return false;
         }
-        status = movingStatus; navigationReason = navigationDetail = ""; return false;
+        status = kind == Movement.DESCEND ? "descending" : kind == Movement.STEP ? "stepping" : movingStatus;
+        navigationReason = navigationDetail = ""; return false;
     }
     private boolean segmentChunksLoaded(int[] end) {
         int px = (int)Math.floor(posX), pz = (int)Math.floor(posZ);
@@ -703,37 +860,97 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private List<int[]> standingCandidates(int x,int y,int z,boolean mining) {
         List<int[]> result = new java.util.ArrayList<int[]>();
-        for (int dx = -2; dx <= 2; dx++) for (int dz = -2; dz <= 2; dz++) for (int dy = -2; dy <= 2; dy++) {
-            if (dx*dx+dy*dy+dz*dz > 9 || mining && dx == 0 && dz == 0 && dy == 0) continue;
+        for (int dx = -3; dx <= 3; dx++) for (int dz = -3; dz <= 3; dz++) for (int dy = -3; dy <= 3; dy++) {
+            if (dx*dx+dz*dz > 9) continue;
             int sx = x+dx, sy = y+dy, sz = z+dz;
-            if (!standing(sx,sy,sz,mining ? x : -30000001,mining ? y-1 : -1,z)) continue;
-            // During ramp removal, back up onto the higher step before harvesting the lower one.
-            if (mining && cursor >= (plan[5]-plan[3]+1)*(plan[6]-plan[4]+1)*(plan[7]-plan[8]+1) && sy <= y) continue;
-            if (mining && !sight(sx+.5,sy+getEyeHeight(),sz+.5,x,y-1,z)) continue;
+            if (failedEndpoints.contains(positionKey(sx,sy,sz)) && Arrays.equals(interactionTarget,new int[] {x,y,z})) continue;
+            double fy = feet(sx,sy,sz,mining ? x : -30000001,mining ? y-1 : -1,z);
+            if (Double.isNaN(fy) || !interactionFailure(sx+.5,fy,sz+.5,x,y,z,mining,false).isEmpty()) continue;
             result.add(new int[] {sx,sy,sz});
         }
         java.util.Collections.sort(result,(a,b) -> Double.compare(getDistanceSq(a[0]+.5,a[1],a[2]+.5),getDistanceSq(b[0]+.5,b[1],b[2]+.5)));
         return result;
     }
     private boolean standing(int x,int y,int z,int removedX,int removedY,int removedZ) {
-        if (y < 1 || y+1 >= worldObj.getHeight() || !worldObj.blockExists(x,y-1,z)
-                || !worldObj.blockExists(x,y+1,z) || x == removedX && y-1 == removedY && z == removedZ) return false;
-        if (!worldObj.isSideSolid(x,y-1,z,net.minecraftforge.common.util.ForgeDirection.UP)) return false;
-        for (int dy = 0; dy < 2; dy++) {
-            Block block = worldObj.getBlock(x,y+dy,z);
-            if (block.getMaterial().isLiquid() || !block.getBlocksMovement(worldObj,x,y+dy,z)) return false;
-        }
-        return true;
+        return !Double.isNaN(feet(x,y,z,removedX,removedY,removedZ));
     }
     private boolean recoveryStanding(int x,int y,int z) {
-        if (!standing(x,y,z,-30000001,-1,0)) return false;
-        // Passable materials can still have collision shapes (for example thin snow).
-        // This body fits inside the checked loaded column; do not use world entity/chunk scans.
-        AxisAlignedBB body = AxisAlignedBB.getBoundingBox(x+.5-width/2,y,z+.5-width/2,x+.5+width/2,y+height,z+.5+width/2);
-        recoveryCollisions.clear();
-        for (int dy = -1; dy <= 1; dy++)
-            worldObj.getBlock(x,y+dy,z).addCollisionBoxesToList(worldObj,x,y+dy,z,body,recoveryCollisions,this);
-        return recoveryCollisions.isEmpty();
+        return standing(x,y,z,-30000001,-1,0);
+    }
+    private AxisAlignedBB body(double x,double y,double z) {
+        return AxisAlignedBB.getBoundingBox(x+boundingBox.minX-posX,y+.001,z+boundingBox.minZ-posZ,
+                x+boundingBox.maxX-posX,y+boundingBox.maxY-boundingBox.minY-.001,z+boundingBox.maxZ-posZ);
+    }
+    private Block routeBlock(int x,int y,int z,int rx,int ry,int rz) {
+        if (x == rx && y == ry && z == rz) return net.minecraft.init.Blocks.air;
+        int[] p = proposedAccess.get(positionKey(x,y,z));
+        return p == null ? worldObj.getBlock(x,y,z) : p[3] == 0 ? net.minecraft.init.Blocks.cobblestone : net.minecraft.init.Blocks.ladder;
+    }
+    /** Loaded block collision shapes only: World.getCollidingBoundingBoxes also scans entities/chunks. */
+    private boolean collisions(AxisAlignedBB box,int rx,int ry,int rz,List<AxisAlignedBB> result,boolean dry) {
+        result.clear();
+        for (int x = (int)Math.floor(box.minX); x <= (int)Math.floor(box.maxX); x++)
+            for (int z = (int)Math.floor(box.minZ); z <= (int)Math.floor(box.maxZ); z++)
+                for (int y = Math.max(0,(int)Math.floor(box.minY)-1); y <= Math.min(worldObj.getHeight()-1,(int)Math.floor(box.maxY)); y++) {
+                    if (!worldObj.blockExists(x,y,z)) return false;
+                    Block block = routeBlock(x,y,z,rx,ry,rz);
+                    if (dry && y+1 > box.minY && block.getMaterial().isLiquid()) return false;
+                    int[] p = proposedAccess.get(positionKey(x,y,z));
+                    if (p != null && !(x == rx && y == ry && z == rz)) {
+                        AxisAlignedBB shape = p[3] == 0 ? AxisAlignedBB.getBoundingBox(x,y,z,x+1,y+1,z+1)
+                                : AxisAlignedBB.getBoundingBox(x+(p[3] == 4 ? .875 : 0),y,z+(p[3] == 2 ? .875 : 0),
+                                        x+(p[3] == 5 ? .125 : 1),y+1,z+(p[3] == 3 ? .125 : 1));
+                        if (shape.intersectsWith(box)) result.add(shape);
+                    } else block.addCollisionBoxesToList(worldObj,x,y,z,box,result,this);
+                }
+        return true;
+    }
+    private boolean clearBody(double x,double y,double z,int rx,int ry,int rz) {
+        return collisions(body(x,y,z),rx,ry,rz,recoveryCollisions,true) && recoveryCollisions.isEmpty();
+    }
+    private boolean solidAttachment(int x,int y,int z,net.minecraftforge.common.util.ForgeDirection face,int rx,int ry,int rz) {
+        if (y < 0 || y >= worldObj.getHeight() || !worldObj.blockExists(x,y,z) || x == rx && y == ry && z == rz) return false;
+        int[] p = proposedAccess.get(positionKey(x,y,z));
+        return p != null ? p[3] == 0 : worldObj.isSideSolid(x,y,z,face);
+    }
+    private boolean ladder(int x,int y,int z,int rx,int ry,int rz) {
+        if (y < 0 || y >= worldObj.getHeight() || !recoveryCellLoaded(x,y,z)) return false;
+        Block b = routeBlock(x,y,z,rx,ry,rz);
+        if (!b.isLadder(worldObj,x,y,z,this)) return false;
+        if (b instanceof net.minecraft.block.BlockLadder) {
+            int[] p = proposedAccess.get(positionKey(x,y,z));
+            int meta = p == null ? worldObj.getBlockMetadata(x,y,z) : p[3];
+            net.minecraftforge.common.util.ForgeDirection face = meta == 2 ? net.minecraftforge.common.util.ForgeDirection.NORTH
+                    : meta == 3 ? net.minecraftforge.common.util.ForgeDirection.SOUTH
+                    : meta == 4 ? net.minecraftforge.common.util.ForgeDirection.WEST : net.minecraftforge.common.util.ForgeDirection.EAST;
+            return meta >= 2 && meta <= 5 && solidAttachment(x-face.offsetX,y,z-face.offsetZ,face,rx,ry,rz);
+        }
+        return b.canBlockStay(worldObj,x,y,z);
+    }
+    /** Node Y is the floor of feet Y, not an assumption that its support is a full cube. */
+    private double feet(int x,int y,int z,int rx,int ry,int rz) {
+        boolean cache = searchHeights != null && rx == searchRemovedX && ry == searchRemovedY && rz == searchRemovedZ;
+        long key = positionKey(x,y,z);
+        if (cache && searchHeights.containsKey(key)) return searchHeights.get(key);
+        double value = computeFeet(x,y,z,rx,ry,rz);
+        if (cache && searchHeights.size() < 32768) searchHeights.put(key,value);
+        return value;
+    }
+    private double computeFeet(int x,int y,int z,int rx,int ry,int rz) {
+        if (y < 0 || y+1 >= worldObj.getHeight() || !recoveryCellLoaded(x,y,z)) return Double.NaN;
+        if (ladder(x,y,z,rx,ry,rz) && clearBody(x+.5,y,z+.5,rx,ry,rz)) return y;
+        AxisAlignedBB probe = AxisAlignedBB.getBoundingBox(x+.5-width/2,y-.01,z+.5-width/2,x+.5+width/2,y+1,z+.5+width/2);
+        if (!collisions(probe,rx,ry,rz,recoveryCollisions,false)) return Double.NaN;
+        double top = Double.NaN;
+        for (AxisAlignedBB shape : recoveryCollisions)
+            if (shape.maxY >= y-.001 && shape.maxY < y+1-.001 && (Double.isNaN(top) || shape.maxY > top)) top = shape.maxY;
+        return !Double.isNaN(top) && clearBody(x+.5,top,z+.5,rx,ry,rz) ? top : Double.NaN;
+    }
+    private double nodeY(int[] p) { return feet(p[0],p[1],p[2],-30000001,-1,0); }
+    private Movement movement(int[] a,int[] b) {
+        if (ladder(a[0],a[1],a[2],-30000001,-1,0) || ladder(b[0],b[1],b[2],-30000001,-1,0)) return Movement.CLIMB;
+        double dy = nodeY(b)-nodeY(a);
+        return dy > .01 ? Movement.STEP : dy < -.01 ? Movement.DESCEND : Movement.WALK;
     }
     private boolean sight(double sx,double sy,double sz,int x,int y,int z) {
         for (int cx = Math.min((int)Math.floor(sx),x)>>4; cx <= (Math.max((int)Math.floor(sx),x)>>4); cx++)
@@ -771,36 +988,46 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (pendingDrops != null) distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,pendingDrops[0],pendingDrops[2]))-16));
         return (int)Math.floor(10*distance);
     }
-    private boolean safeEdge(int[] a,int[] b) {
-        if (Math.abs(a[0]-b[0])+Math.abs(a[2]-b[2]) != 1 || Math.abs(a[1]-b[1]) > 1) return false;
-        if (a[1] == b[1]) return true;
-        int[] low = a[1] < b[1] ? a : b;
-        return worldObj.blockExists(low[0],low[1]+2,low[2])
-                && !worldObj.getBlock(low[0],low[1]+2,low[2]).getMaterial().isLiquid()
-                && worldObj.getBlock(low[0],low[1]+2,low[2]).getBlocksMovement(worldObj,low[0],low[1]+2,low[2]);
+    private boolean safeEdge(int[] a,int[] b,int rx,int ry,int rz) {
+        int horizontal = Math.abs(a[0]-b[0])+Math.abs(a[2]-b[2]);
+        double ay = feet(a[0],a[1],a[2],rx,ry,rz), by = feet(b[0],b[1],b[2],rx,ry,rz);
+        if (Double.isNaN(ay) || Double.isNaN(by) || by-ay > 1.001 || ay-by > 2.001 || horizontal > 1) return false;
+        if (horizontal == 0 && (Math.abs(a[1]-b[1]) != 1
+                || !ladder(a[0],a[1],a[2],rx,ry,rz) || !ladder(b[0],b[1],b[2],rx,ry,rz))) return false;
+        // Lift/translate/lower the actual body. A dry drop of at most two blocks is
+        // directed; the independent exit search, not reversing this edge, proves escape.
+        double high = Math.max(ay,by);
+        for (int i = 0; i <= 4; i++) {
+            double t = i/4.0;
+            if (!clearBody(a[0]+.5+(b[0]-a[0])*t,high,a[2]+.5+(b[2]-a[2])*t,rx,ry,rz)) return false;
+            if (!clearBody(a[0]+.5,ay+(high-ay)*t,a[2]+.5,rx,ry,rz)
+                    || !clearBody(b[0]+.5,by+(high-by)*t,b[2]+.5,rx,ry,rz)) return false;
+        }
+        return true;
     }
     private boolean routeIntact(List<int[]> route,int from,int to,int removedX,int removedY,int removedZ) {
         return routeIntact(route,from,to,removedX,removedY,removedZ,false);
     }
     private boolean routeIntact(List<int[]> route,int from,int to,int removedX,int removedY,int removedZ,boolean recovery) {
-        for (int i = from; i <= to; i++) {
+        int step = to >= from ? 1 : -1;
+        for (int i = from;; i += step) {
             int[] p = route.get(i);
             if (!(recovery ? inRecoveryBounds(p[0],p[1],p[2]) && recoveryStanding(p[0],p[1],p[2])
                     : inCorridor(p[0],p[2]) && standing(p[0],p[1],p[2],removedX,removedY,removedZ))
-                    || i > from && !safeEdge(route.get(i-1),p)) return false;
+                    || i != from && !safeEdge(route.get(i-step),p,removedX,removedY,removedZ)) return false;
+            if (i == to) break;
         }
         return true;
     }
     private int routePosition(List<int[]> route) {
-        int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.1), pz = (int)Math.floor(posZ);
+        int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.001), pz = (int)Math.floor(posZ);
         for (int i = 0; i < route.size(); i++) {
             int[] p = route.get(i); if (p[0] == px && p[1] == py && p[2] == pz) return i;
         }
         return -1;
     }
     private boolean stationEndpoint(int[] p) {
-        return (double)(p[0]-plan[0])*(p[0]-plan[0])+(double)(p[1]-plan[1])*(p[1]-plan[1])
-                +(double)(p[2]-plan[2])*(p[2]-plan[2]) <= 9;
+        return interactionFailure(p[0]+.5,nodeY(p),p[2]+.5,plan[0],plan[1],plan[2],false,false).isEmpty();
     }
     private List<int[]> cachedTravel(List<int[]> goals,int removedX,int removedY,int removedZ) {
         if (returnRoute.isEmpty() || !stationEndpoint(returnRoute.get(0))) { returnRoute.clear(); return null; }
@@ -810,7 +1037,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (Arrays.equals(returnRoute.get(i),goal) && Math.abs(i-here) < cost) { there = i; cost = Math.abs(i-here); }
         }
         if (there < 0) return null;
-        if (!routeIntact(returnRoute,Math.min(here,there),Math.max(here,there),removedX,removedY,removedZ)) {
+        if (!routeIntact(returnRoute,here,there,removedX,removedY,removedZ)) {
             returnRoute.clear(); return null;
         }
         List<int[]> result = new java.util.ArrayList<int[]>();
@@ -824,23 +1051,33 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return best;
     }
     /** Bounded A*: rank every interaction endpoint by actual route cost plus admissible progress.
-     * Cardinal edges may climb/descend one block and must be safe in both directions. */
+     * Steps climb at most one block; dry drops descend at most two. */
     private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ) {
         return searchRoute(goals,removedX,removedY,removedZ,false);
     }
     private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ,boolean recovery) {
-        int sx = (int)Math.floor(posX), sy = (int)Math.floor(boundingBox.minY+.1), sz = (int)Math.floor(posZ);
-        if (sy < 1 || sy+1 >= worldObj.getHeight()) {
+        return searchRoute(goals,removedX,removedY,removedZ,recovery,null);
+    }
+    private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ,boolean recovery,int[] startPosition) {
+        searchHeights = new java.util.HashMap<Long,Double>();
+        searchRemovedX = removedX; searchRemovedY = removedY; searchRemovedZ = removedZ;
+        try { return expandRoute(goals,removedX,removedY,removedZ,recovery,startPosition); }
+        finally { searchHeights = null; }
+    }
+    private List<int[]> expandRoute(List<int[]> goals,int removedX,int removedY,int removedZ,boolean recovery,int[] startPosition) {
+        int sx = startPosition == null ? (int)Math.floor(posX) : startPosition[0];
+        int sy = startPosition == null ? (int)Math.floor(boundingBox.minY+.001) : startPosition[1];
+        int sz = startPosition == null ? (int)Math.floor(posZ) : startPosition[2];
+        if (sy < 0 || sy+1 >= worldObj.getHeight()) {
             navigationReason = "footing"; navigationDetail = "Start outside supported world height: " + sy; return null;
         }
-        if (!worldObj.blockExists(sx,sy-1,sz) || !worldObj.blockExists(sx,sy+1,sz)
-                || recovery && !recoveryCellLoaded(sx,sy,sz)) {
+        if (!worldObj.blockExists(sx,Math.max(0,sy-1),sz) || !worldObj.blockExists(sx,Math.min(worldObj.getHeight()-1,sy+2),sz)
+                || !recoveryCellLoaded(sx,sy,sz)) {
             navigationReason = "chunk"; navigationDetail = "Start chunk unavailable: " + sx+","+sy+","+sz;
             status = recovery ? "corridor_recovery" : "chunk"; return null;
         }
         if (!(recovery ? recoveryStanding(sx,sy,sz) : standing(sx,sy,sz,removedX,removedY,removedZ))) {
-            navigationReason = !worldObj.isSideSolid(sx,sy-1,sz,net.minecraftforge.common.util.ForgeDirection.UP)
-                    || sx == removedX && sy-1 == removedY && sz == removedZ ? "footing" : "clearance";
+            navigationReason = clearBody(sx+.5,sy,sz+.5,removedX,removedY,removedZ) ? "footing" : "clearance";
             navigationDetail = "Unsupported or obstructed start: " + sx+","+sy+","+sz; return null;
         }
         if (!recovery && !inCorridor(sx,sz)) {
@@ -858,38 +1095,50 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int[] first = new int[] {sx,sy,sz,0,recovery ? recoveryHeuristic(sx,sz) : routeHeuristic(sx,sy,sz,goals)};
         visited.put(start,first); open.add(first);
         int expanded = 0; boolean unloaded = false, distanceLimited = false;
-        while (!open.isEmpty() && expanded < 8192 && visited.size() < 16384) {
+        Long bestEndpoint = null; int bestCost = Integer.MAX_VALUE;
+        while (!open.isEmpty() && expanded < 8192 && visited.size() < 16384 && open.peek()[4] < bestCost) {
             int[] p = open.poll(); long key = positionKey(p[0],p[1],p[2]);
             if (visited.get(key) != p) continue;
             expanded++;
             if (recovery ? inCorridor(p[0],p[2]) : endpoints.contains(key)) {
-                List<int[]> result = new java.util.ArrayList<int[]>();
-                while (true) {
-                    int[] node = visited.get(key); result.add(new int[] {node[0],node[1],node[2]});
-                    if (key == start) break;
-                    if (result.size() >= 4096) { navigationReason = "detour_limit"; navigationDetail = "Route exceeds 4096 positions"; return null; }
-                    key = parents.get(key);
-                }
-                java.util.Collections.reverse(result); return result;
+                // Native path completion permits width (.6) blocks of center error. Prefer
+                // endpoints with that much reach margin, but retain exact final approaches.
+                int penalty = !recovery && interactionTarget != null && !storageTask()
+                        && getEndpointDistance(p,interactionTarget) > 2.35 ? 30 : 0;
+                if (p[3]+penalty < bestCost) { bestCost = p[3]+penalty; bestEndpoint = key; }
+                // A fringe endpoint can also be the entrance to a better, deeper endpoint.
+                if (penalty == 0) continue;
             }
-            for (int direction = 0; direction < 4; direction++) for (int stepY = -1; stepY <= 1; stepY++) {
+            // Recovery retains its original reversible one-block envelope policy.
+            for (int direction = 0; direction < 5; direction++) for (int stepY = recovery ? -1 : -2; stepY <= 1; stepY++) {
+                if (direction == 4 && stepY == 0) continue;
                 int nx = p[0]+(direction == 0 ? 1 : direction == 1 ? -1 : 0);
                 int nz = p[2]+(direction == 2 ? 1 : direction == 3 ? -1 : 0), ny = p[1]+stepY;
-                if (ny < 1 || ny+1 >= worldObj.getHeight()) continue;
+                if (ny < 0 || ny+1 >= worldObj.getHeight()) continue;
                 if (recovery ? !inRecoveryBounds(nx,ny,nz) : !inCorridor(nx,nz)) {
                     if (recovery) distanceLimited = true;
                     continue;
                 }
-                if (!worldObj.blockExists(nx,ny,nz) || recovery && !recoveryCellLoaded(nx,ny,nz)) { unloaded = true; continue; }
+                if (!worldObj.blockExists(nx,ny,nz) || !recoveryCellLoaded(nx,ny,nz)) { unloaded = true; continue; }
                 long next = positionKey(nx,ny,nz); int cost = p[3]+10+4*Math.abs(stepY);
                 if (recovery && cost > RECOVERY_COST) { distanceLimited = true; continue; }
                 int[] old = visited.get(next);
                 if (old != null && old[3] <= cost || !(recovery ? recoveryStanding(nx,ny,nz) : standing(nx,ny,nz,removedX,removedY,removedZ))) continue;
                 int[] node = new int[] {nx,ny,nz,cost,cost+(recovery ? recoveryHeuristic(nx,nz) : routeHeuristic(nx,ny,nz,goals))};
-                if (!safeEdge(p,node)) continue;
+                if (!safeEdge(p,node,removedX,removedY,removedZ)) continue;
                 if (old == null && visited.size() >= 16384) continue;
                 visited.put(next,node); parents.put(next,key); open.add(node);
             }
+        }
+        if (bestEndpoint != null) {
+            List<int[]> result = new java.util.ArrayList<int[]>(); long key = bestEndpoint;
+            while (true) {
+                int[] node = visited.get(key); result.add(new int[] {node[0],node[1],node[2]});
+                if (key == start) break;
+                if (result.size() >= 4096) { navigationReason = "detour_limit"; navigationDetail = "Route exceeds 4096 positions"; return null; }
+                key = parents.get(key);
+            }
+            java.util.Collections.reverse(result); return result;
         }
         navigationReason = !open.isEmpty() ? "search_limit" : unloaded ? "chunk" : distanceLimited ? "recovery_limit" : "path";
         navigationDetail = "No complete safe route; expanded=" + expanded + " discovered=" + visited.size()
@@ -898,12 +1147,239 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if ("chunk".equals(navigationReason)) status = recovery ? "corridor_recovery" : "chunk";
         return null;
     }
+    private double getEndpointDistance(int[] p,int[] target) {
+        double dy = nodeY(p)-target[1];
+        return Math.sqrt((double)(p[0]-target[0])*(p[0]-target[0])+dy*dy+(double)(p[2]-target[2])*(p[2]-target[2]));
+    }
+    private List<int[]> executableRoute(List<int[]> goals,int x,int y,int z,boolean mining) {
+        int rx = mining ? x : -30000001, ry = mining ? y-1 : -1;
+        List<int[]> remaining = new java.util.ArrayList<int[]>(goals);
+        for (int attempt = 0; attempt < 3 && !remaining.isEmpty(); attempt++) {
+            // Travel happens before harvesting: never walk through hypothetical air.
+            List<int[]> found = searchRoute(remaining,-30000001,-1,0);
+            if (found == null) found = cachedTravel(remaining,-30000001,-1,0);
+            if (found == null || !mining) return found;
+            int[] end = found.get(found.size()-1);
+            // Check the exit from the chosen work position before any descent. The exit
+            // search is independent: it need not retrace the entrance or reuse a stale cache.
+            List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
+            List<int[]> exit = exits.isEmpty() ? null : searchRoute(exits,rx,ry,z,false,end);
+            if (exit != null) {
+                java.util.Collections.reverse(exit); returnRoute.clear(); returnRoute.addAll(exit); return found;
+            }
+            remaining.removeIf(p -> Arrays.equals(p,end));
+        }
+        navigationReason = "return_blocked";
+        navigationDetail = "No verified storage exit from the selected work endpoints (three bounded searches maximum)";
+        return null;
+    }
+    private boolean accessArea(int x,int y,int z) {
+        return x >= plan[3] && x <= plan[5] && z >= plan[4] && z <= plan[6] && y >= plan[8] && y <= plan[7]
+                && recoveryCellLoaded(x,y,z) && WorkerAccess.ownsLand(worldObj,x,z,factionId);
+    }
+    private boolean reservedAccess(int x,int y,int z) {
+        for (int[] p : accessBlocks) if (p[0] == x && p[1] == y && p[2] == z) return true;
+        return false;
+    }
+    private boolean accessPresent(int[] p) {
+        if (!worldObj.blockExists(p[0],p[1],p[2])) return false;
+        return p[3] == 0 ? solidAttachment(p[0],p[1],p[2],net.minecraftforge.common.util.ForgeDirection.UP,-30000001,-1,0)
+                : routeBlock(p[0],p[1],p[2],-30000001,-1,0) == net.minecraft.init.Blocks.ladder
+                        && (proposedAccess.containsKey(positionKey(p[0],p[1],p[2])) ? proposedAccess.get(positionKey(p[0],p[1],p[2]))[3]
+                                : worldObj.getBlockMetadata(p[0],p[1],p[2])) == p[3]
+                        && ladder(p[0],p[1],p[2],-30000001,-1,0);
+    }
+    /** A small wall ladder, extended downward as mined layers expose air. Both ladder
+     * cells and their backing stay inside the authorized excavation. No digging/virtual edits. */
+    private boolean planAccess(int x,int y,int z) {
+        if (buildingAccess || accessAttempts >= 2 || "chunk".equals(status)) return false;
+        accessAttempts++;
+        // Repair recorded access first. Never replace occupied, liquid or infrastructure cells.
+        if (startAccessRepair(new int[] {x,y,z})) return true;
+        if (accessBlocks.size()+32 > 1024) { navigationReason = "access_limit"; return false; }
+        List<int[]> best = null; int bestCost = Integer.MAX_VALUE; boolean limited = false;
+        List<List<int[]>> proposals = new java.util.ArrayList<List<int[]>>();
+        // Stop at the exposed work layer, not two cells inside unmined terrain.
+        // Later extensions can join the retained ladder above this sixteen-cell window.
+        int bottom = Math.max(plan[8],Math.min(y,(int)Math.floor(boundingBox.minY)));
+        int top = Math.min(plan[7],bottom+15);
+        if (bottom > top) return false;
+        boolean fromBelow = boundingBox.minY < (top+bottom)/2.0;
+        // All nearby columns/faces are evaluated; existing-terrain search has already
+        // considered the whole bounded rim, including more distant lower entrances.
+        for (int dx = -2; dx <= 2; dx++) for (int dz = -2; dz <= 2; dz++) for (int face = 2; face <= 5; face++) {
+            net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(face);
+            int lx = x+dx, lz = z+dz, bx = lx-d.offsetX, bz = lz-d.offsetZ;
+            List<int[]> proposal = new java.util.ArrayList<int[]>(); boolean valid = true;
+            for (int level = 0; level <= top-bottom && valid; level++) {
+                int ly = fromBelow ? bottom+level : top-level;
+                if (!accessArea(lx,ly,lz) || !accessArea(bx,ly,bz) || lx == x && ly == y-1 && lz == z
+                        || bx == x && ly == y-1 && bz == z) { valid = false; break; }
+                if (worldObj.getTileEntity(bx,ly,bz) != null || worldObj.getTileEntity(lx,ly,lz) != null
+                        || BuilderPlacement.protectedBlock(worldObj,bx,ly,bz) || BuilderPlacement.protectedBlock(worldObj,lx,ly,lz)) { valid = false; break; }
+                if ((!solidAttachment(bx,ly,bz,d,-30000001,-1,0) || !solidAttachment(bx,ly,bz,net.minecraftforge.common.util.ForgeDirection.UP,-30000001,-1,0))
+                        && !worldObj.isAirBlock(bx,ly,bz)) { valid = false; break; }
+                if (!worldObj.isAirBlock(lx,ly,lz) && !accessPresent(new int[] {lx,ly,lz,face})) { valid = false; break; }
+                int[] back = new int[] {bx,ly,bz,0}, rung = new int[] {lx,ly,lz,face};
+                proposal.add(back); proposal.add(rung);
+            }
+            if (valid) proposals.add(proposal);
+        }
+        java.util.Collections.sort(proposals,(a,b) -> Double.compare(accessEstimate(a),accessEstimate(b)));
+        for (int attempt = 0; attempt < Math.min(4,proposals.size()); attempt++) {
+            List<int[]> proposal = proposals.get(attempt);
+            try {
+                boolean buildable = true;
+                for (int[] p : proposal) if (!accessPresent(p)) {
+                    if (placementSide(p) < 0) { buildable = false; break; }
+                    proposedAccess.put(positionKey(p[0],p[1],p[2]),p);
+                }
+                if (!buildable) continue;
+                if (proposedAccess.isEmpty()) continue;
+                List<int[]> goals = standingCandidates(x,y,z,true);
+                if (goals.isEmpty()) continue;
+                List<int[]> approach = executableRoute(goals,x,y,z,true);
+                if (approach == null) { limited |= "search_limit".equals(navigationReason) || "return_limit".equals(navigationReason); continue; }
+                // Building is a physical trip too. Its first missing cell must
+                // be interactable from existing terrain before publishing the proposal.
+                int[] firstMissing = null;
+                for (int[] p : proposal) if (worldObj.isAirBlock(p[0],p[1],p[2])) { firstMissing = p; break; }
+                int materialCost = proposedAccess.size()*30;
+                proposedAccess.clear();
+                if (firstMissing == null || searchRoute(standingCandidates(firstMissing[0],firstMissing[1],firstMissing[2],false),-30000001,-1,0) == null) continue;
+                int cost = materialCost;
+                for (int i = 1; i < approach.size(); i++) cost += 10+4*Math.abs(approach.get(i)[1]-approach.get(i-1)[1]);
+                if (cost < bestCost) { bestCost = cost; best = proposal; }
+            } finally { proposedAccess.clear(); returnRoute.clear(); }
+        }
+        if (best == null) {
+            if (!"reach".equals(navigationReason) && !"sight".equals(navigationReason))
+                navigationReason = limited || proposals.size() > 4 ? "access_limit" : "access_blocked";
+            navigationDetail += "; no attached ladder route inside work bounds after bounded access planning";
+            return false;
+        }
+        accessPlan.clear(); accessPlan.addAll(best); accessIndex = 0; buildingAccess = true;
+        accessDestination = new int[] {x,y,z}; accessSupplyChecked = false;
+        resetPath(); status = "constructing"; return true;
+    }
+    private double accessEstimate(List<int[]> proposal) {
+        double cost = 0;
+        for (int[] p : proposal) if (!accessPresent(p)) cost += p[3] == 0 ? 40 : 30;
+        int[] first = proposal.get(0);
+        return cost+Math.sqrt(getDistanceSq(first[0]+.5,first[1],first[2]+.5))*10;
+    }
+    private boolean startAccessRepair(int[] goal) {
+        List<int[]> repairs = new java.util.ArrayList<int[]>();
+        for (int[] p : accessBlocks) if (repairs.size() < 32 && !accessPresent(p) && accessArea(p[0],p[1],p[2]) && worldObj.isAirBlock(p[0],p[1],p[2])) repairs.add(p.clone());
+        if (repairs.isEmpty()) return false;
+        accessPlan.clear(); accessPlan.addAll(repairs); accessIndex = 0; buildingAccess = true;
+        accessDestination = goal; accessSupplyChecked = false;
+        resetPath(); status = "constructing"; return true;
+    }
+    private static boolean accessMaterial(ItemStack stack,boolean rung) {
+        if (stack == null || stack.stackSize <= 0 || !(stack.getItem() instanceof net.minecraft.item.ItemBlock) || stack.hasTagCompound()) return false;
+        Block b = ((net.minecraft.item.ItemBlock)stack.getItem()).field_150939_a;
+        return rung ? b == net.minecraft.init.Blocks.ladder : b.isNormalCube() && !(b instanceof net.minecraft.block.BlockFalling)
+                && !b.hasTileEntity(stack.getItemDamage()) && b != net.minecraft.init.Blocks.bedrock && b != net.minecraft.init.Blocks.command_block
+                && (b.getMaterial() == net.minecraft.block.material.Material.rock || b.getMaterial() == net.minecraft.block.material.Material.ground);
+    }
+    private int accessCount(boolean rung) {
+        int count = 0; for (ItemStack stack : cargo) if (accessMaterial(stack,rung)) count += stack.stackSize; return count;
+    }
+    private int accessNeeded(boolean rung) {
+        int count = 0;
+        for (int i = accessIndex; i < accessPlan.size(); i++) if ((accessPlan.get(i)[3] != 0) == rung && !accessPresent(accessPlan.get(i))) count++;
+        return count;
+    }
+    private void constructAccess() {
+        if (!buildingAccess) return;
+        while (accessIndex < accessPlan.size()) {
+            int[] p = accessPlan.get(accessIndex);
+            if (accessPresent(p)) {
+                if (!reservedAccess(p[0],p[1],p[2])) accessBlocks.add(p.clone());
+                accessIndex++; continue;
+            }
+            if (!accessArea(p[0],p[1],p[2]) || !worldObj.isAirBlock(p[0],p[1],p[2])) {
+                navigationReason = "access_blocked"; navigationDetail = "Access cell changed: " + Arrays.toString(p);
+                buildingAccess = false; terminalNavigation(); return;
+            }
+            int blocks = Math.max(0,accessNeeded(false)-accessCount(false)), ladders = Math.max(0,accessNeeded(true)-accessCount(true));
+            if (blocks > 0 || ladders > 0) {
+                requestedBlocks = blocks; requestedLadders = ladders;
+                if (!accessSupplyChecked) {
+                    List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
+                    accessStationReachable = !exits.isEmpty() && searchRoute(exits,-30000001,-1,0) != null;
+                    accessSupplyChecked = true;
+                }
+                if (!accessStationReachable) { status = "no_access"; supplyCheckTicks = 40; return; }
+                beginStorage(StorageReason.ACCESS); return;
+            }
+            if (!moveNear(p[0],p[1],p[2],false)) {
+                if ("route_failed".equals(status)) { navigationReason = "access_blocked"; terminalNavigation(); }
+                return;
+            }
+            status = "constructing";
+            if (!placeAccess(p)) {
+                navigationReason = "placement"; navigationDetail = "Access placement refused at " + Arrays.toString(p);
+                terminalNavigation(); return;
+            }
+            if (!reservedAccess(p[0],p[1],p[2])) accessBlocks.add(p.clone());
+            accessIndex++; returnRoute.clear(); return;
+        }
+        buildingAccess = false; accessPlan.clear(); accessIndex = 0; requestedBlocks = requestedLadders = 0;
+        failedEndpoints.clear(); accessAttempts = 0; returnRoute.clear();
+        if (resumeStorageAfterAccess) {
+            resumeStorageAfterAccess = false; beginStorage(accessStorageReason); accessStorageReason = StorageReason.NONE;
+        } else returnToWork("supplied access completed");
+    }
+    private boolean placeAccess(int[] p) {
+        int slot = -1; for (int i = 0; i < cargo.length; i++) if (accessMaterial(cargo[i],p[3] != 0)) { slot = i; break; }
+        if (slot < 0 || !authorized() || !accessArea(p[0],p[1],p[2]) || !worldObj.isAirBlock(p[0],p[1],p[2])
+                || worldObj.getTileEntity(p[0],p[1],p[2]) != null || BuilderPlacement.protectedBlock(worldObj,p[0],p[1],p[2])) return false;
+        ItemStack material = cargo[slot], offered = material.copy(); offered.stackSize = 1;
+        net.minecraft.item.ItemBlock item = (net.minecraft.item.ItemBlock)material.getItem();
+        Block block = item.field_150939_a;
+        int side = placementSide(p);
+        if (side < 0) return false;
+        net.minecraftforge.common.util.ForgeDirection direction = net.minecraftforge.common.util.ForgeDirection.getOrientation(side);
+        int bx = p[0]-direction.offsetX, by = p[1]-direction.offsetY, bz = p[2]-direction.offsetZ;
+        FakePlayer player = actor(); player.setPosition(posX,posY,posZ); player.onGround = onGround;
+        if (!solidAttachment(bx,by,bz,direction,-30000001,-1,0) || worldObj.getTileEntity(bx,by,bz) != null
+                || BuilderPlacement.protectedBlock(worldObj,bx,by,bz) || !WorkerAccess.ownsLand(worldObj,bx,bz,factionId)
+                || !player.canPlayerEdit(p[0],p[1],p[2],side,offered)
+                || !worldObj.canPlaceEntityOnSide(block,p[0],p[1],p[2],false,side,null,offered)) return false;
+        net.minecraftforge.common.util.BlockSnapshot before = net.minecraftforge.common.util.BlockSnapshot.getBlockSnapshot(worldObj,p[0],p[1],p[2]);
+        ItemStack previous = player.inventory.mainInventory[0]; player.inventory.mainInventory[0] = offered;
+        boolean accepted = false;
+        try {
+            int meta = block.onBlockPlaced(worldObj,p[0],p[1],p[2],side,.5F,.5F,.5F,item.getMetadata(offered.getItemDamage()));
+            if (item.placeBlockAt(offered,player,worldObj,p[0],p[1],p[2],side,.5F,.5F,.5F,meta)) {
+                net.minecraftforge.event.world.BlockEvent.PlaceEvent event = net.minecraftforge.event.ForgeEventFactory.onPlayerBlockPlace(player,before,direction);
+                accepted = !event.isCanceled() && worldObj.getBlock(p[0],p[1],p[2]) == block && accessPresent(p);
+            }
+        } finally {
+            player.inventory.mainInventory[0] = previous;
+            if (!accepted) before.restore(true,false);
+        }
+        if (accepted && --material.stackSize <= 0) cargo[slot] = null;
+        return accepted;
+    }
+    private int placementSide(int[] p) {
+        for (int f = 0; f < 6; f++) {
+            if (p[3] != 0 && f != p[3]) continue;
+            net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(f);
+            int bx = p[0]-d.offsetX, by = p[1]-d.offsetY, bz = p[2]-d.offsetZ;
+            if (solidAttachment(bx,by,bz,d,-30000001,-1,0) && worldObj.getTileEntity(bx,by,bz) == null
+                    && !BuilderPlacement.protectedBlock(worldObj,bx,by,bz) && WorkerAccess.ownsLand(worldObj,bx,bz,factionId)) return f;
+        }
+        return -1;
+    }
     /** Canonical cache order is storage -> current work position. Check only the prefix needed
      * to leave now; discard stale suffixes rather than joining old trips in opposite directions. */
     private boolean ensureReturnRoute(int removedX,int removedY,int removedZ) {
         int here = routePosition(returnRoute);
         if (here >= 0 && stationEndpoint(returnRoute.get(0))
-                && routeIntact(returnRoute,0,here,removedX,removedY,removedZ)) {
+                && routeIntact(returnRoute,here,0,removedX,removedY,removedZ)) {
             while (returnRoute.size() > here+1) returnRoute.remove(returnRoute.size()-1);
             return true;
         }
@@ -921,14 +1397,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return false;
     }
     private String standingObstruction(int x,int y,int z) {
-        for (int dy = -1; dy <= 1; dy++) {
-            if (!worldObj.blockExists(x,y+dy,z)) return "Unloaded position " + x+","+(y+dy)+","+z;
-            Block b = worldObj.getBlock(x,y+dy,z);
-            if (dy == -1 ? !worldObj.isSideSolid(x,y-1,z,net.minecraftforge.common.util.ForgeDirection.UP)
-                    : b.getMaterial().isLiquid() || !b.getBlocksMovement(worldObj,x,y+dy,z))
-                return (dy == -1 ? "Unsupported floor: " : "Blocked headroom/feet: ") + Block.blockRegistry.getNameForObject(b) + " at " + x+","+(y+dy)+","+z;
+        java.util.Map<String,Integer> failures = new java.util.TreeMap<String,Integer>();
+        for (int dx = -3; dx <= 3; dx++) for (int dz = -3; dz <= 3; dz++) for (int dy = -3; dy <= 3; dy++) {
+            if (dx*dx+dy*dy+dz*dz > 9) continue;
+            double fy = feet(x+dx,y+dy,z+dz,x,y-1,z);
+            String failure = Double.isNaN(fy) ? "footing/clearance/attachment" : interactionFailure(x+dx+.5,fy,z+dz+.5,x,y,z,true,false);
+            if (!failure.isEmpty()) failures.put(failure,failures.containsKey(failure) ? failures.get(failure)+1 : 1);
         }
-        return "No visible supported approach near " + x+","+y+","+z;
+        return "Endpoint candidates near " + x+","+y+","+z + ": " + failures;
     }
     private void terminalNavigation() {
         // Preserve diagnostics before stop/reset clears the live movement state.
@@ -946,7 +1422,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     + " destination=" + Arrays.toString(dest) + " waypoint=" + Arrays.toString(step)
                     + " recoveryOrigin=" + Arrays.toString(recoveryStart) + " recoveryDestination=" + Arrays.toString(recoveryEnd)
                     + " recoveryAttempts=" + attempts
-                    + " range=" + getNavigator().getPathSearchRange() + " bounds=" + Arrays.toString(plan) + " detail=" + navigationDetail);
+                    + " range=" + getNavigator().getPathSearchRange() + " bounds=" + Arrays.toString(plan) + " detail=" + navigationDetail
+                    + " " + endpointDiagnostic(arrivalFailure));
         }
         stop("navigation_failed"); navigationReason = reason; destination = dest.length == 3 ? dest : null; waypoint = step.length == 3 ? step : null;
         recoveryOrigin = recoveryStart; recoveryDestination = recoveryEnd; recoveryAttempts = attempts;
@@ -955,7 +1432,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!worldObj.blockExists(plan[0], plan[1], plan[2])) { status = "chunk"; return; }
         IInventory chest = stationInventory(plan[0], plan[1], plan[2]);
         if (chest == null) { status = stationUnavailable(plan[0], plan[1], plan[2]); return; }
-        if (!moveNear(plan[0], plan[1], plan[2])) { if ("route_failed".equals(status)) terminalNavigation(); return; }
+        if (!moveNear(plan[0], plan[1], plan[2])) {
+            if ("route_failed".equals(status)) {
+                StorageReason interrupted = storageReason;
+                if (!buildingAccess && startAccessRepair(workDestination())) {
+                    resumeStorageAfterAccess = true; accessStorageReason = interrupted;
+                    transition(Task.TO_WORK,"repair storage exit",workDestination()); status = "constructing";
+                } else terminalNavigation();
+            }
+            return;
+        }
         if (task != Task.RESTOCKING || hasCargo() || !overflowDrops.isEmpty())
             transition(Task.DEPOSITING,"at storage: " + storageReason.key,new int[] {plan[0],plan[1],plan[2]});
         equipCarriedTool();
@@ -973,6 +1459,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         toolBroken = false;
         int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
         if (cursor >= total && rampCleanup < 0 && pendingDrops == null) {
+            buildingAccess = resumeStorageAfterAccess = false; accessPlan.clear(); accessIndex = 0;
             transition(Task.COMPLETE,"final deposit finished",null); stop("complete"); return;
         }
         transition(Task.RESTOCKING,"deposit finished; check required supplies",new int[] {plan[0],plan[1],plan[2]});
@@ -1006,7 +1493,26 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             requestedTorches = 1; status = "no_torches"; supplyCheckTicks = 40; return;
         }
         requestedTorches = 0;
+        if (buildingAccess) {
+            stockAccess(chest,false); stockAccess(chest,true);
+            if (accessCount(false) < accessNeeded(false) || accessCount(true) < accessNeeded(true)) {
+                status = "no_access"; supplyCheckTicks = 40; return;
+            }
+        }
         returnToWork("deposit and required restocking finished");
+    }
+    private void stockAccess(IInventory chest,boolean rung) {
+        for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++) {
+            int need = accessNeeded(rung)-accessCount(rung);
+            if (need <= 0) break;
+            ItemStack stack = chest.getStackInSlot(i);
+            if (!accessMaterial(stack,rung)) continue;
+            int amount = Math.min(need,Math.min(stack.stackSize,remainingCapacity(stack)));
+            if (amount <= 0) break;
+            ItemStack taken = chest.decrStackSize(i,amount);
+            if (taken != null) insert(this,taken);
+            chest.markDirty();
+        }
     }
     public static boolean pickaxe(ItemStack stack) {
         return stack != null && stack.stackSize > 0 && (stack.getItem() instanceof ItemPickaxe
@@ -1189,7 +1695,18 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private void updateRequests() {
         requestedTools = requestedTorches = 0;
+        requestedBlocks = requestedLadders = 0;
         if (worldObj.isRemote || !configured || !authorized() || jobDimension != dimension) return;
+        if (buildingAccess) {
+            requestedBlocks = Math.max(0,accessNeeded(false)-accessCount(false));
+            requestedLadders = Math.max(0,accessNeeded(true)-accessCount(true));
+            IInventory supplies = stationAssigned ? stationInventory(plan[0],plan[1],plan[2]) : null;
+            if (supplies != null && accessStationReachable) for (int i = firstSlot(supplies); i < supplies.getSizeInventory(); i++) {
+                ItemStack stack = supplies.getStackInSlot(i);
+                if (accessMaterial(stack,false)) requestedBlocks = Math.max(0,requestedBlocks-stack.stackSize);
+                if (accessMaterial(stack,true)) requestedLadders = Math.max(0,requestedLadders-stack.stackSize);
+            }
+        }
         int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
         if (cursor >= total && rampCleanup < 0) return;
         boolean tool = suitable(getHeldItem());
@@ -1216,7 +1733,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private void notifySupplies() {
         long now = System.nanoTime();
-        if (!running || requestedTools == 0 && requestedTorches == 0
+        if (!running || requestedTools == 0 && requestedTorches == 0 && requestedBlocks == 0 && requestedLadders == 0
                 || sentSupplyReminder && now - lastSupplyReminder < 60000000000L) return;
         EntityPlayerMP recipient = null;
         for (Object value : MinecraftServer.getServer().getConfigurationManager().playerEntityList) {
@@ -1230,6 +1747,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         ChatComponentTranslation light = new ChatComponentTranslation("xf.miner.need_torches", requestedTorches);
         ChatComponentTranslation request = requestedTools > 0 ? tool : light;
         if (requestedTools > 0 && requestedTorches > 0) request = new ChatComponentTranslation("xf.miner.both_requests", tool, light);
+        if (requestedBlocks > 0 || requestedLadders > 0) {
+            ChatComponentTranslation access = new ChatComponentTranslation("xf.miner.need_access",requestedBlocks,requestedLadders);
+            request = requestedTools > 0 || requestedTorches > 0 ? new ChatComponentTranslation("xf.miner.both_requests",request,access) : access;
+        }
         recipient.addChatMessage(new ChatComponentTranslation("xf.miner.supply_notice", getCommandSenderName(),
                 getUniqueID().toString().substring(0, 8), request,
                 new ChatComponentTranslation("xf.miner.supplies")));
@@ -1251,6 +1772,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setInteger("PickaxesRequested", requestedTools);
         tag.setInteger("HarvestLevel", requiredHarvest);
         tag.setInteger("TorchesRequested", requestedTorches);
+        tag.setInteger("BlocksRequested",requestedBlocks); tag.setInteger("LaddersRequested",requestedLadders);
+        tag.setBoolean("BuildingAccess",buildingAccess); tag.setInteger("AccessIndex",accessIndex);
+        tag.setBoolean("ResumeStorageAfterAccess",resumeStorageAfterAccess); tag.setString("AccessStorageReason",accessStorageReason.key);
+        if (accessDestination != null) tag.setIntArray("AccessDestination",accessDestination);
+        if (selectedEndpoint != null) tag.setIntArray("StandingPosition",selectedEndpoint);
+        if (plannedEntrance != null) tag.setIntArray("Entrance",plannedEntrance);
+        tag.setString("ArrivalFailure",arrivalFailure);
+        tag.setString("ActualPosition",String.format(java.util.Locale.ROOT,"%.2f, %.2f, %.2f",posX,boundingBox.minY,posZ));
         tag.setInteger("TorchRestock", Math.max(0, 32 - torchCount()));
         tag.setInteger("WorkCursor", targetCursor);
         tag.setInteger("TaskVersion",1);
@@ -1283,6 +1812,20 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setInteger("RequiredHarvest", requiredHarvest);
         tag.setBoolean("NeedsLight",needsLight);
         tag.setLong("SelectionRevision",selectionRevision);
+        tag.setTag("MinerAccess",writeAccess(accessBlocks)); tag.setTag("MinerAccessPlan",writeAccess(accessPlan));
+    }
+    private NBTTagList writeAccess(List<int[]> source) {
+        NBTTagList list = new NBTTagList();
+        for (int[] p : source) { NBTTagCompound entry = new NBTTagCompound(); entry.setIntArray("Position",p); list.appendTag(entry); }
+        return list;
+    }
+    private void readAccess(NBTTagList saved,List<int[]> into,int limit) {
+        into.clear();
+        for (int i = 0; i < Math.min(limit,saved.tagCount()); i++) {
+            int[] p = saved.getCompoundTagAt(i).getIntArray("Position");
+            if (configured && p.length == 4 && p[0] >= plan[3] && p[0] <= plan[5] && p[2] >= plan[4] && p[2] <= plan[6]
+                    && p[1] >= plan[8] && p[1] <= plan[7] && (p[3] == 0 || p[3] >= 2 && p[3] <= 5)) into.add(p);
+        }
     }
     public void readEntityFromNBT(NBTTagCompound tag) {
         super.readEntityFromNBT(tag); actor = null;
@@ -1323,6 +1866,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             ItemStack stack = ItemStack.loadItemStackFromNBT(overflow.getCompoundTagAt(i));
             if (stack != null && stack.stackSize > 0) overflowDrops.add(stack);
         }
+        readAccess(tag.getTagList("MinerAccess",10),accessBlocks,1024);
+        readAccess(tag.getTagList("MinerAccessPlan",10),accessPlan,32);
+        accessIndex = Math.max(0,Math.min(accessPlan.size(),job.getInteger("AccessIndex")));
+        buildingAccess = job.getBoolean("BuildingAccess") && !accessPlan.isEmpty(); accessAttempts = 0;
+        int[] accessGoal = job.getIntArray("AccessDestination"); accessDestination = accessGoal.length == 3 ? accessGoal : null;
+        interactionTarget = selectedEndpoint = preciseGoal = null; failedEndpoints.clear(); proposedAccess.clear();
+        accessSupplyChecked = false; accessStationReachable = true;
+        resumeStorageAfterAccess = job.getBoolean("ResumeStorageAfterAccess") && buildingAccess;
+        accessStorageReason = StorageReason.NONE;
+        for (StorageReason reason : StorageReason.values()) if (reason.key.equals(job.getString("AccessStorageReason"))) accessStorageReason = reason;
     }
     protected void dropFewItems(boolean recentlyHit, int looting) {
         super.dropFewItems(recentlyHit, looting);
@@ -1353,7 +1906,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     public int getInventoryStackLimit() { return 64; }
     // Cargo/torch slot synchronization must not restart a partly mined block.
     // The work loop compares the actual tool, target, block and metadata instead.
-    public void markDirty() { supplyCheckTicks = 0; }
+    public void markDirty() { supplyCheckTicks = 0; accessSupplyChecked = false; }
     public boolean isUseableByPlayer(EntityPlayer player) { return mayManage(player); }
     public void openInventory() { }
     public void closeInventory() { }
