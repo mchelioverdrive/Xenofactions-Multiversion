@@ -1,6 +1,6 @@
 package com.hfr.inventory.gui;
-import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.hfr.packet.PacketDispatcher; import com.hfr.packet.client.XFMenuDataRequestPacket; import com.hfr.xfgui.*; import com.hfr.xfgui.XFCommandArgument.Type; import net.minecraft.client.*; import net.minecraft.client.gui.*; import net.minecraft.util.*; import org.lwjgl.input.Mouse; import cpw.mods.fml.relauncher.*;
-@SideOnly(Side.CLIENT) public class GUIXenofactionsMenu extends GuiScreen implements GuiYesNoCallback { private static XFMenuData data=new XFMenuData(); private static boolean pending; private static int nextRequest; private static int pendingRequest; private static long pendingSession; private final long session=XFMenuNavigation.session(); private boolean ready; private GuiTextField search; private final Map<String,GuiTextField> fields=new HashMap<String,GuiTextField>(); private XFCommandDefinition.Category cat=XFCommandDefinition.Category.FACTION; private XFCommandDefinition selected; private int scroll; private int argumentPage; private String validation="";
+import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.hfr.packet.PacketDispatcher; import com.hfr.packet.client.XFMenuDataRequestPacket; import com.hfr.xfgui.*; import com.hfr.xfgui.XFCommandArgument.Type; import net.minecraft.client.*; import net.minecraft.client.gui.*; import net.minecraft.util.*; import org.lwjgl.input.Mouse; import org.lwjgl.opengl.GL11; import cpw.mods.fml.relauncher.*;
+@SideOnly(Side.CLIENT) public class GUIXenofactionsMenu extends GuiScreen implements GuiYesNoCallback { private static XFMenuData data=new XFMenuData(); private static boolean pending; private static int nextRequest; private static int pendingRequest; private static long pendingSession; private final long session=XFMenuNavigation.session(); private boolean ready; private GuiTextField search; private final Map<String,GuiTextField> fields=new HashMap<String,GuiTextField>(); private XFCommandDefinition.Category cat=XFCommandDefinition.Category.FACTION; private XFCommandDefinition selected; private int page; private int argumentPage; private String validation="";
  private XFMenuData filteredData; private XFCommandDefinition.Category filteredCategory;
  private String filteredQuery; private int filteredGeneration=-1;
  private List<XFCommandDefinition> filtered=Collections.emptyList();
@@ -37,15 +37,15 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
  }
  private boolean currentSession(){updateSession();return session==XFMenuNavigation.session();}
  private void rememberLocation(){
-  if(ready&&currentSession())XFMenuNavigation.remember(cat,new XFMenuNavigation.Location(selected==null?null:selected.id,search==null?"":search.getText(),scroll,argumentPage));
+  if(ready&&currentSession())XFMenuNavigation.remember(cat,new XFMenuNavigation.Location(browsing||selected==null?null:selected.id,search==null?"":search.getText(),page,argumentPage));
  }
  private void restoreLocation(XFCommandDefinition.Category category){
   XFMenuNavigation.Location location=XFMenuNavigation.location(category);
-  cat=category; search.setText(location.search); scroll=location.scroll; argumentPage=location.argumentPage;
+  cat=category; search.setText(location.search); page=location.page; argumentPage=location.argumentPage;
   selected=null; validation="";
   for(XFCommandDefinition d:list())if(d.id.equals(location.commandId)&&canRestore(d)){selected=d;break;}
   if(selected==null)argumentPage=0;
-  browsing=selected==null; clampScroll(); initGui(); rememberLocation();
+  browsing=selected==null; initGui(); rememberLocation();
  }
  private boolean canRestore(XFCommandDefinition d){
   if(d.factionRank==null)return true;
@@ -66,25 +66,25 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
  private void openInitialAction(){
   if(initialAction==null)return;
   for(XFCommandDefinition d:XFCommandCatalog.getCommands())if(d.id.equals(initialAction)){
-   cat=d.category;search.setText("");scroll=0;selected=null;
+   cat=d.category;search.setText("");page=0;selected=null;
    if(list().contains(d)){selected=d;browsing=false;argumentPage=0;}
    break;
   }
   initialAction=null;initGui();
  }
  public void initGui(){
-  cachedCommand=null;clampScroll();buttonList.clear();
+  cachedCommand=null;allowUserInput=false;clampPage(list());buttonList.clear();
   int x=left(),w=panelWidth();
-  if(search==null)search=new GuiTextField(fontRendererObj,x,51,w-80,18);
-  search.xPosition=x;search.yPosition=51;search.width=w-80;
+  if(search==null)search=new GuiTextField(fontRendererObj,x,71,w-80,18);
+  search.xPosition=x;search.yPosition=71;search.width=w-80;
   buttonList.add(new GuiButtonExt(0,x,height-24,80,20,loc("xf.nav.back")));
   buttonList.add(new GuiButtonExt(5,x+w-80,height-24,80,20,loc("xf.home.help")));
   if(browsing){
-   buttonList.add(new GuiButtonExt(12,x,26,24,20,"<"));
-   buttonList.add(new GuiButtonExt(13,x+w-24,26,24,20,">"));
-   buttonList.add(new GuiButtonExt(4,x+w-76,50,76,20,loc("xf.menu.refresh")));
-   buttonList.add(new GuiButtonExt(10,x,height-49,40,18,"<"));
-   buttonList.add(new GuiButtonExt(11,x+w-40,height-49,40,18,">"));
+   buttonList.add(new CategoryButton(12,x,22,"<"));
+   buttonList.add(new CategoryButton(13,x+w-48,22,">"));
+   buttonList.add(new GuiButtonExt(4,x+w-76,70,76,20,loc("xf.menu.refresh")));
+   buttonList.add(new GuiButtonExt(10,x,pageControlsTop(),40,20,"<"));
+   buttonList.add(new GuiButtonExt(11,x+w-40,pageControlsTop(),40,20,">"));
   }else{
    layoutFields();
    int bw=(w-8)/3;
@@ -93,11 +93,21 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
    buttonList.add(new GuiButtonExt(3,x+(bw+4)*2,height-49,bw,20,loc("xf.menu.copy")));
    buttonList.add(new GuiButtonExt(7,x+84,height-24,w-168,20,loc("xf.menu.details")));
    if(selected!=null&&selected.arguments.length>argumentRows()){
-    buttonList.add(new GuiButtonExt(10,x,height-75,30,18,"<"));
-    buttonList.add(new GuiButtonExt(11,x+w-30,height-75,30,18,">"));
+    buttonList.add(new GuiButtonExt(10,x,height-75,30,20,"<"));
+    buttonList.add(new GuiButtonExt(11,x+w-30,height-75,30,20,">"));
    }
   }
   for(Object o:buttonList){GuiButton b=(GuiButton)o;if(b.id!=0&&b.id!=5)b.enabled=ready&&!awaitingSetup;}
+  updateNavigation(list());
+ }
+ /** Keep Forge's button surface and hit box; only double the category arrow glyph. */
+ @SideOnly(Side.CLIENT) private static final class CategoryButton extends GuiButtonExt {
+  CategoryButton(int id,int x,int y,String arrow){super(id,x,y,48,40,arrow);}
+  public void drawCenteredString(FontRenderer font,String text,int x,int y,int color){
+   GL11.glPushMatrix();
+   try{GL11.glTranslatef(x,y-4,0);GL11.glScalef(2,2,1);super.drawCenteredString(font,text,0,0,color);}
+   finally{GL11.glPopMatrix();}
+  }
  }
  private void layoutFields(){
   if(selected==null)return;
@@ -113,17 +123,14 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
   positionFields();
  }
  protected void actionPerformed(GuiButton b){
+  if(!b.enabled||!b.visible)return;
   cachedCommand=null;
   if(b.id==0){if(!browsing){browsing=true;initGui();}else mc.displayGuiScreen(parent);return;}
   if(b.id==5){mc.displayGuiScreen(new GUIXFHelp(this));return;}
   if(!ready||!currentSession()||awaitingSetup)return;
   if(b.id>=2000){int i=b.id-2000;List<String> options=choices(selected.arguments[i]);GuiTextField f=fields.get("a"+i);f.setText(options.get((options.indexOf(f.getText())+1)%options.size()));return;}
-  if(b.id==12||b.id==13){rememberLocation();XFCommandDefinition.Category[] all=XFCommandDefinition.Category.values();fields.clear();restoreLocation(all[(cat.ordinal()+all.length+(b.id==12?-1:1))%all.length]);browsing=true;initGui();return;}
-  if(b.id==10||b.id==11){
-   if(browsing){scroll+=b.id==10?-listRows():listRows();clampScroll();}
-   else{argumentPage=Math.max(0,Math.min((selected.arguments.length-1)/argumentRows(),argumentPage+(b.id==10?-1:1)));positionFields();}
-   return;
-  }
+  if(b.id==12||b.id==13){changeCategory(b.id==12?-1:1);return;}
+  if(b.id==10||b.id==11){changePage(b.id==10?-1:1);return;}
   if(b.id==4){requestData();return;}
   if(selected==null)return;
   if(b.id==7){showReference();return;}
@@ -157,7 +164,8 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
  public void updateScreen(){if(!currentSession()){mc.displayGuiScreen(null);return;}search.updateCursorCounter();for(GuiTextField f:fields.values())f.updateCursorCounter();}
  protected void mouseClicked(int mx,int my,int btn){
   keyboardButton=-1;super.mouseClicked(mx,my,btn);if(!ready||mc.currentScreen!=this)return;
-  if(browsing){search.mouseClicked(mx,my,btn);if(btn==0&&mx>=left()&&mx<left()+panelWidth()&&my>=80&&my<80+listRows()*22){int i=scroll+(my-80)/22;List<XFCommandDefinition> l=list();if(i<l.size()){selected=l.get(i);browsing=false;argumentPage=0;fields.clear();validation="";initGui();}}}
+  if(browsing){search.mouseClicked(mx,my,btn);List<XFCommandDefinition> l=list();clampPage(l);
+   if(btn==0&&inside(mx,my,left(),listTop(),panelWidth(),listRows()*22)&&(my-listTop())%22<20){int i=page*listRows()+(my-listTop())/22;if(i<l.size()){selected=l.get(i);browsing=false;argumentPage=0;fields.clear();validation="";initGui();}}}
   else for(int i=0;selected!=null&&i<selected.arguments.length;i++)if(argumentVisible(i))fields.get("a"+i).mouseClicked(mx,my,btn);
  }
  protected void keyTyped(char c,int k){
@@ -177,20 +185,38 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
    int id=keyboardButton>=0?keyboardButton:!browsing?1:-1;
    for(Object o:buttonList){GuiButton b=(GuiButton)o;if(b.id==id&&b.visible&&b.enabled){actionPerformed(b);return;}}
   }
-  if(browsing&&search.isFocused()){search.textboxKeyTyped(c,k);scroll=0;}
+  if(browsing&&search.isFocused()){search.textboxKeyTyped(c,k);updateNavigation(list());}
   else for(int i=0;selected!=null&&i<selected.arguments.length;i++)if(argumentVisible(i))fields.get("a"+i).textboxKeyTyped(c,k);
  }
- public void handleMouseInput(){super.handleMouseInput();int d=Mouse.getEventDWheel();if(d!=0&&ready&&browsing){scroll+=d<0?1:-1;clampScroll();}}
+ public void handleMouseInput(){
+  // GuiScreen handles clicks/drags only; read this event's wheel once, in GUI coordinates.
+  super.handleMouseInput();int wheel=Mouse.getEventDWheel();
+  if(wheel==0||mc.currentScreen!=this||!ready||!currentSession()||awaitingSetup)return;
+  int mx=Mouse.getEventX()*width/mc.displayWidth;
+  int my=height-Mouse.getEventY()*height/mc.displayHeight-1;
+  int direction=wheel<0?1:-1;
+  if(browsing){
+   if(inside(mx,my,left(),22,panelWidth(),40)){changeCategory(direction);return;}
+   if(inside(mx,my,left(),listTop(),panelWidth(),listRows()*22)
+     ||inside(mx,my,left(),pageControlsTop(),panelWidth(),20)){changePage(direction);return;}
+  }else if(selected!=null){
+   // Argument choices are cycle buttons, not a suggestion popup. The form owns this region.
+   if(inside(mx,my,left(),fieldTop()-10,panelWidth(),argumentRows()*34)
+     ||inside(mx,my,left(),height-75,panelWidth(),20)){changePage(direction);return;}
+  }
+ }
  public void drawScreen(int mx,int my,float f){
   drawDefaultBackground();int x=left(),w=panelWidth();
   drawCenteredString(fontRendererObj,loc("xf.menu.title"),width/2,compactSetup()?72:8,0xffffff);
   if(!ready){drawCenteredString(fontRendererObj,loc("xf.menu.loading"),width/2,80,0xcccccc);super.drawScreen(mx,my,f);return;}
   if(browsing){
-   drawCenteredString(fontRendererObj,loc("xf.category."+cat.name().toLowerCase(Locale.ROOT)),width/2,32,0xffdd88);
-   if(search.getText().isEmpty()&&!search.isFocused())drawString(fontRendererObj,loc("xf.menu.search"),x+4,56,0x888888);
-   search.drawTextBox();List<XFCommandDefinition> l=list();
-   for(int i=scroll,y=80;i<Math.min(l.size(),scroll+listRows());i++,y+=22){XFCommandDefinition d=l.get(i);drawRect(x,y,x+w,y+20,d==selected?0x805050a0:0x80000000);drawString(fontRendererObj,fontRendererObj.trimStringToWidth(loc(d.displayKey),w-12),x+6,y+6,d.dangerous?0xffaaaa:0xffffff);}
-   drawCenteredString(fontRendererObj,l.isEmpty()?loc("xf.menu.empty"):(scroll/listRows()+1)+"/"+Math.max(1,(l.size()+listRows()-1)/listRows()),width/2,height-43,0xaaaaaa);
+   drawCenteredString(fontRendererObj,fontRendererObj.trimStringToWidth(StatCollector.translateToLocalFormatted("xf.menu.category",loc("xf.category."+cat.name().toLowerCase(Locale.ROOT))),w-104),width/2,38,0xffdd88);
+   search.drawTextBox();
+   if(search.getText().isEmpty()&&!search.isFocused())drawString(fontRendererObj,loc("xf.menu.search"),x+4,76,0x888888);
+   List<XFCommandDefinition> l=list();updateNavigation(l);int start=page*listRows();
+   for(int i=start,y=listTop();i<Math.min(l.size(),start+listRows());i++,y+=22){XFCommandDefinition d=l.get(i);drawRect(x,y,x+w,y+20,d==selected?0x805050a0:0x80000000);drawString(fontRendererObj,fontRendererObj.trimStringToWidth(loc(d.displayKey),w-12),x+6,y+6,d.dangerous?0xffaaaa:0xffffff);}
+   if(l.isEmpty())drawCenteredString(fontRendererObj,loc("xf.menu.empty"),width/2,listTop()+6,0xaaaaaa);
+   drawCenteredString(fontRendererObj,StatCollector.translateToLocalFormatted("xf.menu.page",page+1,pageCount(l)),width/2,pageControlsTop()+6,0xaaaaaa);
   }else if(selected!=null){
    drawString(fontRendererObj,fontRendererObj.trimStringToWidth(loc(selected.displayKey),w),x,compactSetup()?88:28,0xffdd88);
    List<String> desc=fontRendererObj.listFormattedStringToWidth(loc(selected.descriptionKey),w);
@@ -204,6 +230,7 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
   super.drawScreen(mx,my,f);
   if(setupPanel())com.hfr.client.XFFactionSetup.draw(width,height,true,left());
   for(Object o:buttonList){GuiButton b=(GuiButton)o;if(b.id==keyboardButton&&b.enabled&&b.visible){drawRect(b.xPosition,b.yPosition,b.xPosition+b.width,b.yPosition+1,0xffffdd88);drawRect(b.xPosition,b.yPosition+b.height-1,b.xPosition+b.width,b.yPosition+b.height,0xffffdd88);}}
+  drawNavigationTooltip(mx,my);
  }
  private List<XFCommandDefinition> list(){if(!ready)return Collections.emptyList();String query=search==null?"":search.getText();
  int generation=com.hfr.client.render.GpuModelManager.generation();
@@ -211,8 +238,46 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
  if(filteredGeneration!=generation)searchText.clear();
  filteredData=data;filteredCategory=cat;filteredGeneration=generation;filteredQuery=query;
  String q=query.toLowerCase(Locale.ROOT);List<XFCommandDefinition> r=new ArrayList<XFCommandDefinition>(); for(XFCommandDefinition d:XFCommandCatalog.getCommands()){ if(q.length()==0&&d.category!=cat)continue; if(d.opLevel>0&&!data.permittedCommands.contains(d.id))continue; if("tdm".equals(d.configRequirement)&&!data.tdmEnabled)continue; if("customflags".equals(d.configRequirement)&&!data.customFlagsEnabled)continue; if("xflags".equals(d.configRequirement)&&!data.xflagsEnabled)continue; String hay=searchText.get(d); if(hay==null){hay=(loc(d.displayKey)+" "+loc(d.descriptionKey)+" "+usage(d)+" "+Arrays.toString(d.aliases)+" /"+d.root+(d.sub==null?"":" "+d.sub)).toLowerCase(Locale.ROOT);searchText.put(d,hay);} if(q.length()==0||hay.contains(q))r.add(d);} filtered=Collections.unmodifiableList(r);return filtered;} private static String usage(XFCommandDefinition d){return StatCollector.canTranslate(d.usage)?loc(d.usage):d.usage;} private static String loc(String k){String s=StatCollector.translateToLocal(k);return s==null?k:s;}
- private int listRows(){return Math.max(1,(height-135)/22);}
- private void clampScroll(){scroll=Math.max(0,Math.min(Math.max(0,list().size()-listRows()),scroll));}
+ private int listTop(){return 98;}
+ private int pageControlsTop(){return height-49;}
+ private int listRows(){return Math.max(1,(pageControlsTop()-listTop()-4)/22);}
+ private int pageCount(List<XFCommandDefinition> actions){return Math.max(1,(actions.size()+listRows()-1)/listRows());}
+ private void clampPage(List<XFCommandDefinition> actions){page=Math.max(0,Math.min(pageCount(actions)-1,page));}
+ private int argumentPages(){return selected==null?1:Math.max(1,(selected.arguments.length+argumentRows()-1)/argumentRows());}
+ private static boolean inside(int mx,int my,int x,int y,int w,int h){return mx>=x&&mx<x+w&&my>=y&&my<y+h;}
+ private void updateNavigation(List<XFCommandDefinition> actions){
+  clampPage(actions);
+  argumentPage=Math.max(0,Math.min(argumentPages()-1,argumentPage));
+  for(Object o:buttonList){GuiButton b=(GuiButton)o;boolean available=ready&&!awaitingSetup;
+   if(b.id==12)b.enabled=available&&cat.ordinal()>0;
+   if(b.id==13)b.enabled=available&&cat.ordinal()<XFCommandDefinition.Category.values().length-1;
+   if(b.id==10)b.enabled=available&&(browsing?page:argumentPage)>0;
+   if(b.id==11)b.enabled=available&&(browsing?page<pageCount(actions)-1:argumentPage<argumentPages()-1);
+  }
+ }
+ private void changeCategory(int direction){
+  XFCommandDefinition.Category[] all=XFCommandDefinition.Category.values();
+  int next=Math.max(0,Math.min(all.length-1,cat.ordinal()+direction));
+  if(next==cat.ordinal())return;
+  rememberLocation();fields.clear();restoreLocation(all[next]);
+  selected=null;browsing=true;argumentPage=0;initGui();rememberLocation();
+ }
+ private void changePage(int direction){
+  List<XFCommandDefinition> actions=list();clampPage(actions);
+  if(browsing)page=Math.max(0,Math.min(pageCount(actions)-1,page+direction));
+  else if(selected!=null){argumentPage=Math.max(0,Math.min(argumentPages()-1,argumentPage+direction));positionFields();}
+  updateNavigation(actions);rememberLocation();
+ }
+ private void drawNavigationTooltip(int mx,int my){
+  for(Object o:buttonList){GuiButton b=(GuiButton)o;
+   if(!b.visible||!inside(mx,my,b.xPosition,b.yPosition,b.width,b.height))continue;
+   String key=b.id==12?"xf.menu.previous_category":b.id==13?"xf.menu.next_category":
+     b.id==10?(browsing?"xf.menu.previous_page":"xf.menu.previous_arguments"):
+     b.id==11?(browsing?"xf.menu.next_page":"xf.menu.next_arguments"):null;
+   if(key!=null)drawHoveringText(fontRendererObj.listFormattedStringToWidth(loc(key),Math.min(220,width-24)),mx,my,fontRendererObj);
+   return;
+  }
+ }
  private int argumentRows(){return Math.max(1,(height-fieldTop()-80)/34);}
  private boolean argumentVisible(int i){return i>=argumentPage*argumentRows()&&i<(argumentPage+1)*argumentRows();}
  private void positionFields(){
@@ -220,6 +285,7 @@ import cpw.mods.fml.client.config.GuiButtonExt; import java.util.*; import com.h
   argumentPage=Math.min(argumentPage,Math.max(0,(selected.arguments.length-1)/argumentRows()));
   for(int i=0;i<selected.arguments.length;i++){GuiTextField field=fields.get("a"+i);field.yPosition=fieldTop()+(i-argumentPage*argumentRows())*34;if(!argumentVisible(i))field.setFocused(false);}
   for(Object o:buttonList){GuiButton b=(GuiButton)o;if(b.id>=2000){int i=b.id-2000;b.visible=argumentVisible(i);b.yPosition=fields.get("a"+i).yPosition;}}
+  updateNavigation(list());
  } private List<String> choices(XFCommandArgument a){
   List<String> result=new ArrayList<String>(); if(!a.required)result.add("");
   if(a.options.length>0){for(String option:a.options)if(!result.contains(option))result.add(option);return result;}

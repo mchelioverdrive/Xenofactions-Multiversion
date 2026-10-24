@@ -14,13 +14,13 @@ public final class XFMenuNavigation {
     public static final class Location {
         public final String commandId;
         public final String search;
-        public final int scroll;
+        public final int page;
         public final int argumentPage;
 
-        public Location(String commandId, String search, int scroll, int argumentPage) {
+        public Location(String commandId, String search, int page, int argumentPage) {
             this.commandId = commandId;
             this.search = search;
-            this.scroll = scroll;
+            this.page = page;
             this.argumentPage = argumentPage;
         }
     }
