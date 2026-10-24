@@ -254,7 +254,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private void clearAccessSearch() { accessProposals = null; accessSearchTarget = null; accessProposalIndex = 0; accessSearchExhausted = false; }
     private void usefulProgress(String reason) {
-        boolean hadFailures = objectiveFailures > 0;
+        boolean hadFailures = objectiveFailures > 0 || objectiveTicks > 0;
         objectiveFailures = objectiveTicks = 0;
         watchedTerrain.clear(); terrainChecks = null;
         if (hadFailures) diagnostic("reset",reason);
@@ -792,7 +792,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 motionX = dx*scale; motionZ = dz*scale;
                 if (isOnLadder()) {
                     double dy = fy+(ladder(preciseGoal[0],preciseGoal[1],preciseGoal[2],-30000001,-1,0) ? 0 : .08)-boundingBox.minY;
-                    motionY = Math.abs(dy) < .01 ? 0 : dy > 0 ? Math.max(.08,Math.min(.12,dy*.4)) : Math.min(-.08,Math.max(-.12,dy*.4));
+                    motionY = Math.abs(dy) < .01 ? dy : dy > 0 ? Math.max(.08,Math.min(.12,dy*.4)) : Math.min(-.08,Math.max(-.12,dy*.4));
                 }
                 super.moveEntityWithHeading(0,0); return;
             }
@@ -896,7 +896,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 double distance = getDistanceSq(entry[0]+.5,nodeY(entry),entry[2]+.5);
                 if (distance <= .0125 && (onGround || isOnLadder())) {
                     enteringRoute = false; preciseGoal = null; pathTicks = 0; bestRouteProgress = -Double.MAX_VALUE;
-                    if (reachedPositions.add(positionKey(entry[0],entry[1],entry[2]))) objectiveTicks = 0;
+                    if (reachedPositions.size() < 4096 && reachedPositions.add(positionKey(entry[0],entry[1],entry[2]))) {
+                        objectiveTicks = 0; diagnostic("reset","entered new route position");
+                    }
                 } else {
                     if (-distance > bestRouteProgress+.01) { bestRouteProgress = -distance; pathTicks = 0; }
                     else pathTicks += 10;
@@ -954,7 +956,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     failedEndpoints.add(positionKey(selectedEndpoint[0],selectedEndpoint[1],selectedEndpoint[2]));
                 getNavigator().clearPathEntity(); preciseGoal = null; route.clear(); routeRetries++; pathTicks = 0;
                 clearRouteSearch(); routeFailure();
-            } else if (preciseGoal != null && getDistanceSq(preciseGoal[0]+.5,nodeY(preciseGoal),preciseGoal[2]+.5) > .0125) {
+            } else if (preciseGoal != null && getDistanceSq(preciseGoal[0]+.5,nodeY(preciseGoal),preciseGoal[2]+.5) > .000001) {
                 Movement kind = movement(route.get(routeIndex),preciseGoal);
                 status = kind == Movement.CLIMB ? "climbing" : kind == Movement.DESCEND ? "descending"
                         : kind == Movement.STEP ? "stepping" : "final_approach"; return false;
@@ -1708,7 +1710,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return "Endpoint candidates near " + x+","+y+","+z + ": " + failures;
     }
     private void terminalNavigation() {
-        // Preserve diagnostics before stop/reset clears the live movement state.
+        // Preserve the final diagnostic while freezing execution until conditions change.
         int[] dest = destination == null ? new int[0] : destination.clone();
         int[] step = waypoint == null ? new int[0] : waypoint.clone();
         String reason = navigationReason.isEmpty() ? "path" : navigationReason;
