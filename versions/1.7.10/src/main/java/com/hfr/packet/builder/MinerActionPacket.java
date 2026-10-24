@@ -12,20 +12,17 @@ import net.minecraft.entity.player.EntityPlayerMP;
 public final class MinerActionPacket implements IMessage {
     private int id, action;
     private String uuid = "";
-    private int[] plan = new int[EntityFactionMiner.PLAN_SIZE];
     public MinerActionPacket() { }
-    public MinerActionPacket(EntityFactionMiner worker, int action, int[] plan) {
-        id = worker.getEntityId(); uuid = worker.getUniqueID().toString(); this.action = action; this.plan = plan.clone();
+    public MinerActionPacket(EntityFactionMiner worker, int action) {
+        id = worker.getEntityId(); uuid = worker.getUniqueID().toString(); this.action = action;
     }
     public void fromBytes(ByteBuf buf) {
         id = buf.readInt(); uuid = ByteBufUtils.readUTF8String(buf); action = buf.readUnsignedByte();
-        if (uuid.length() != 36 || action > 2) throw new IllegalArgumentException("Invalid miner action");
-        for (int i = 0; i < plan.length; i++) plan[i] = buf.readInt();
+        if (uuid.length() != 36 || action > 4) throw new IllegalArgumentException("Invalid miner action");
         if (buf.isReadable()) throw new IllegalArgumentException("Trailing miner data");
     }
     public void toBytes(ByteBuf buf) {
         buf.writeInt(id); ByteBufUtils.writeUTF8String(buf, uuid); buf.writeByte(action);
-        for (int value : plan) buf.writeInt(value);
     }
     public static final class Handler extends BuilderServerHandler<MinerActionPacket> {
         protected IMessage handle(MinerActionPacket message, MessageContext context) {
@@ -37,9 +34,14 @@ public final class MinerActionPacket implements IMessage {
             EntityFactionMiner worker = (EntityFactionMiner)entity;
             if (!worker.mayManage(player)) return null;
             String feedback = "";
-            if (message.action == 1) feedback = worker.configure(player, message.plan);
+            if (message.action == 1) feedback = worker.start(player);
             else if (message.action == 2) worker.pause();
-            return new MinerSnapshotPacket(worker, feedback);
+            else if (message.action == 3) feedback = com.hfr.items.ItemMinerWand.give(player, worker, true);
+            else if (message.action == 4) {
+                int[] selected = com.hfr.items.ItemMinerWand.selection(player, worker);
+                feedback = selected.length == 7 ? worker.configure(player, com.hfr.items.ItemMinerWand.plan(selected)) : "xf.miner.select_area";
+            }
+            return new MinerSnapshotPacket(worker, player, feedback);
         }
     }
 }

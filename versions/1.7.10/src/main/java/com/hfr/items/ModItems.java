@@ -18,6 +18,7 @@ public class ModItems {
 	}
 
     public static Item builder_contract, farmer, miner;
+    public static Item miner_station_wand, miner_area_wand;
 	public static Item rice;
 	public static Item rice_seeds;
 	public static Item rice_bag;
@@ -68,6 +69,8 @@ public class ModItems {
         builder_contract = new ItemBuilderContract().setUnlocalizedName("builder_contract").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:farmer");
         farmer = new ItemWorkerContract(false).setUnlocalizedName("farmer").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:farmer");
         miner = new ItemWorkerContract(true).setUnlocalizedName("miner").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:miner");
+        miner_station_wand = new ItemMinerWand(false).setUnlocalizedName("miner_station_wand").setFull3D().setTextureName("hfr:wand");
+        miner_area_wand = new ItemMinerWand(true).setUnlocalizedName("miner_area_wand").setFull3D().setTextureName("hfr:wand");
 
 		components_wood = new ItemLore().setUnlocalizedName("components_wood").setCreativeTab(MainRegistry.tab).setTextureName(RefStrings.MODID + ":components_wood");
 		components_scaffold = new ItemLore().setUnlocalizedName("components_scaffold").setCreativeTab(MainRegistry.tab).setTextureName(RefStrings.MODID + ":components_scaffold");
@@ -110,6 +113,8 @@ public class ModItems {
 	}
 	
 	private static void registerItem() {
+        GameRegistry.registerItem(miner_station_wand, miner_station_wand.getUnlocalizedName());
+        GameRegistry.registerItem(miner_area_wand, miner_area_wand.getUnlocalizedName());
 		GameRegistry.registerItem(out_of_bounds_wand, out_of_bounds_wand.getUnlocalizedName());
 		GameRegistry.registerItem(world_border_wand, world_border_wand.getUnlocalizedName());
 

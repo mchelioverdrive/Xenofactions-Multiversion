@@ -605,6 +605,11 @@ public class CommonEventHandler {
 		}
 	}
 
+    @SubscribeEvent(priority = EventPriority.HIGHEST, receiveCanceled = true)
+    public void onMinerWandInteract(PlayerInteractEvent event) {
+        com.hfr.items.ItemMinerWand.interact(event);
+    }
+
 	@SubscribeEvent
 	public void onWorldTick(WorldTickEvent event) {
 
@@ -851,7 +856,7 @@ public class CommonEventHandler {
 
 	}
 	
-	private boolean isWithinCustomDropYRange(int y, Integer minY, Integer maxY) {
+	private static boolean isWithinCustomDropYRange(int y, Integer minY, Integer maxY) {
 		return minY == null || maxY == null || (y >= minY.intValue() && y <= maxY.intValue());
 	}
 
@@ -867,6 +872,11 @@ public class CommonEventHandler {
 	
 	@SubscribeEvent(priority = EventPriority.LOW)
 	public void oreDropEvent(BreakEvent event) {
+		if (com.hfr.worker.MinerHarvestDrops.defer(event)) return;
+		dropStoneRewards(event);
+	}
+
+	public static void dropStoneRewards(BreakEvent event) {
 		
 		if(event.isCanceled())
 			return;

@@ -26,7 +26,7 @@ public class GUIHandler implements IGuiHandler {
         if (ID == com.hfr.entity.EntityFactionMiner.GUI_ID) {
             net.minecraft.entity.Entity worker = world.getEntityByID(x);
             return worker instanceof com.hfr.entity.EntityFactionMiner && ((com.hfr.entity.EntityFactionMiner)worker).mayManage(player)
-                    ? new com.hfr.inventory.container.ContainerMinerNPC((com.hfr.entity.EntityFactionMiner)worker) : null;
+                    ? new com.hfr.inventory.container.ContainerMinerNPC(player.inventory, (com.hfr.entity.EntityFactionMiner)worker) : null;
         }
 		TileEntity entity = world.getTileEntity(x, y, z);
         if (ID == ModBlocks.guiID_builder || ID == ModBlocks.guiID_builder_npc) {
@@ -118,7 +118,7 @@ public class GUIHandler implements IGuiHandler {
 	public Object getClientGuiElement(int ID, EntityPlayer player, World world, int x, int y, int z) {
         if (ID == com.hfr.entity.EntityFactionMiner.GUI_ID) {
             net.minecraft.entity.Entity worker = world.getEntityByID(x);
-            return worker instanceof com.hfr.entity.EntityFactionMiner ? new com.hfr.inventory.gui.GUIMinerNPC((com.hfr.entity.EntityFactionMiner)worker) : null;
+            return worker instanceof com.hfr.entity.EntityFactionMiner ? new com.hfr.inventory.gui.GUIMinerNPC(player.inventory, (com.hfr.entity.EntityFactionMiner)worker) : null;
         }
 		TileEntity entity = world.getTileEntity(x, y, z);
         if (ID == ModBlocks.guiID_builder || ID == ModBlocks.guiID_builder_npc) {

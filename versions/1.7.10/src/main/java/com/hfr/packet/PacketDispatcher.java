@@ -110,6 +110,7 @@ public class PacketDispatcher {
         wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicPacket.class, i++, Side.SERVER);
         wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicDataRequestPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicDataRequestPacket.class, i++, Side.SERVER);
         wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicDataChunkPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicDataChunkPacket.class, i++, Side.CLIENT);
+        wrapper.registerMessage(com.hfr.packet.builder.MinerWandPacket.Handler.class, com.hfr.packet.builder.MinerWandPacket.class, i++, Side.SERVER);
 
 	}
 	

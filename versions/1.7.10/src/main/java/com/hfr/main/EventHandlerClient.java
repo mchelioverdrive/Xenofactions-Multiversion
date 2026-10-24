@@ -575,6 +575,7 @@ public class EventHandlerClient {
 
     @SubscribeEvent
     public void renderWorkerPlans(RenderWorldLastEvent event) {
+        com.hfr.client.MinerSelectionPreview.render(event);
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.theWorld == null || mc.renderViewEntity == null) return;
         Entity camera = mc.renderViewEntity;
@@ -592,6 +593,22 @@ public class EventHandlerClient {
                 GL11.glPopMatrix();
             }
         }
+    }
+
+    @SubscribeEvent
+    public void minerWandMouse(net.minecraftforge.client.event.MouseEvent event) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.currentScreen != null || mc.thePlayer == null || mc.objectMouseOver == null
+                || mc.objectMouseOver.typeOfHit != net.minecraft.util.MovingObjectPosition.MovingObjectType.BLOCK) return;
+        net.minecraft.item.ItemStack held = mc.thePlayer.getHeldItem();
+        if (held == null || !(held.getItem() instanceof com.hfr.items.ItemMinerWand)) return;
+        boolean first = event.button == mc.gameSettings.keyBindAttack.getKeyCode() + 100;
+        boolean second = event.button == mc.gameSettings.keyBindUseItem.getKeyCode() + 100;
+        if ((!first && !second) || !event.buttonstate) return;
+        event.setCanceled(true);
+        net.minecraft.util.MovingObjectPosition hit = mc.objectMouseOver;
+        PacketDispatcher.wrapper.sendToServer(new com.hfr.packet.builder.MinerWandPacket(hit.blockX,hit.blockY,hit.blockZ,hit.sideHit,
+                mc.thePlayer.inventory.currentItem,mc.thePlayer.dimension,first));
     }
 	
 	private volatile boolean disconnectCleanup;
