@@ -12,6 +12,7 @@ public final class ContainerMinerNPC extends Container {
     public final EntityFactionMiner worker;
     // Server-owned, per-window approval; closing the container discards it.
     public EntityFactionMiner.Activation replacement;
+    public long snapshotSequence;
     public ContainerMinerNPC(InventoryPlayer player, EntityFactionMiner worker) {
         this.worker = worker;
         for (int i = 0; i < 27; i++) addSlotToContainer(new Slot(worker,i,8+i%9*18,81+i/9*18));

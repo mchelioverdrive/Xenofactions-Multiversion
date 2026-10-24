@@ -606,9 +606,36 @@ public class EventHandlerClient {
         boolean second = event.button == mc.gameSettings.keyBindUseItem.getKeyCode() + 100;
         if ((!first && !second) || !event.buttonstate) return;
         event.setCanceled(true);
-        net.minecraft.util.MovingObjectPosition hit = mc.objectMouseOver;
-        PacketDispatcher.wrapper.sendToServer(new com.hfr.packet.builder.MinerWandPacket(hit.blockX,hit.blockY,hit.blockZ,hit.sideHit,
-                mc.thePlayer.inventory.currentItem,mc.thePlayer.dimension,first));
+        sendMinerWandClick(mc, first);
+    }
+
+    // Keyboard-bound attack/use follows the same click path as mouse-bound controls.
+    @SubscribeEvent
+    public void minerWandKey(cpw.mods.fml.common.gameevent.InputEvent.KeyInputEvent event) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (!Keyboard.getEventKeyState() || Keyboard.isRepeatEvent()) return;
+        int key = Keyboard.getEventKey() == 0 ? Keyboard.getEventCharacter()+256 : Keyboard.getEventKey();
+        boolean first = key == mc.gameSettings.keyBindAttack.getKeyCode();
+        if (!first && key != mc.gameSettings.keyBindUseItem.getKeyCode()) return;
+        if (sendMinerWandClick(mc,first)) {
+            net.minecraft.client.settings.KeyBinding.setKeyBindState(key,false);
+            while ((first ? mc.gameSettings.keyBindAttack : mc.gameSettings.keyBindUseItem).isPressed()) { }
+        }
+    }
+    private boolean sendMinerWandClick(Minecraft mc, boolean first) {
+        if (mc.currentScreen != null || mc.thePlayer == null || mc.objectMouseOver == null
+                || mc.objectMouseOver.typeOfHit != net.minecraft.util.MovingObjectPosition.MovingObjectType.BLOCK) return false;
+        net.minecraft.item.ItemStack held = mc.thePlayer.getHeldItem();
+        if (held == null || !(held.getItem() instanceof com.hfr.items.ItemMinerWand)) return false;
+        if (held.hasTagCompound()) {
+            int sneak = mc.gameSettings.keyBindSneak.getKeyCode();
+            boolean down = sneak < 0 ? org.lwjgl.input.Mouse.isButtonDown(sneak+100)
+                    : sneak > 0 && sneak < Keyboard.KEYBOARD_SIZE && Keyboard.isKeyDown(sneak);
+            net.minecraft.util.MovingObjectPosition hit = mc.objectMouseOver;
+            PacketDispatcher.wrapper.sendToServer(new com.hfr.packet.builder.MinerWandPacket(hit.blockX,hit.blockY,hit.blockZ,hit.sideHit,
+                    mc.thePlayer.inventory.currentItem,mc.thePlayer.dimension,first,down,held.getTagCompound().getString("Miner")));
+        }
+        return true;
     }
 	
 	private volatile boolean disconnectCleanup;

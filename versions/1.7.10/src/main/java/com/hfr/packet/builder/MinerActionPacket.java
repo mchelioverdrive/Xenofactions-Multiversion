@@ -40,6 +40,8 @@ public final class MinerActionPacket implements IMessage {
             }
             String feedback = "";
             if (message.action == 1 || message.action == 4) {
+                if (message.action == 4 && container.replacement == null)
+                    return new MinerSnapshotPacket(worker,player,"xf.miner.selection_changed",true);
                 EntityFactionMiner.Activation result = worker.start(player, message.action == 4 ? container.replacement : null);
                 container.replacement = result.needsConfirmation() ? result : null;
                 feedback = result.feedback;

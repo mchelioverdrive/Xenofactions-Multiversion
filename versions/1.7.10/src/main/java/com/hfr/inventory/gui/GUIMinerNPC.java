@@ -32,6 +32,7 @@ public final class GUIMinerNPC extends GuiContainer {
     }
     public boolean matches(int id, String uuid) { return worker.getEntityId() == id && worker.getUniqueID().toString().equals(uuid); }
     public void receive(NBTTagCompound state, String feedback) {
+        if (this.state != null && state.getLong("Sequence") <= this.state.getLong("Sequence")) return;
         this.state = state; lastSnapshotTick = screenTicks;
         if (state.getBoolean("ActionReply") || !feedback.isEmpty()) { this.feedback = feedback; scroll = 0; }
         confirm = state.getBoolean("ConfirmReplacement");
@@ -103,7 +104,20 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,I18n.format("xf.miner.area")+":");
             if (state.getBoolean("Configured")) {
                 detail(lines,coord(p[3],p[8],p[4])+" >"); detail(lines,coord(p[5],p[7],p[6]));
+                bounds(lines,p,state.getBoolean("Down"));
             } else detail(lines,I18n.format("xf.miner.no_area"));
+            int[] proposed = state.getIntArray("ProposedPlan");
+            if (confirm && proposed.length == EntityFactionMiner.PLAN_SIZE) {
+                detail(lines,I18n.format("xf.miner.proposed"));
+                detail(lines,coord(proposed[3],proposed[8],proposed[4])+" > "+coord(proposed[5],proposed[7],proposed[6]));
+                bounds(lines,proposed,state.getBoolean("ProposedDown"));
+            }
+            if (!state.getString("NavigationReason").isEmpty()) {
+                detail(lines,I18n.format("xf.miner.nav."+state.getString("NavigationReason")));
+                if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
+                int[] dest = state.getIntArray("Destination");
+                if (dest.length == 3) detail(lines,I18n.format("xf.miner.destination",coord(dest[0],dest[1],dest[2])));
+            }
             int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
             detail(lines,I18n.format("xf.miner.requests"));
             if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
@@ -115,7 +129,7 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,I18n.format("xf.miner.pending")+":");
             if (c.length == 7) {
                 detail(lines,"A: "+coord(c[0],c[1],c[2])); detail(lines,"B: "+coord(c[3],c[4],c[5]));
-                detail(lines,I18n.format("xf.miner.volume",ItemMinerWand.volume(c))+(c[6] == 1 ? " (Y:0)" : ""));
+                bounds(lines,ItemMinerWand.plan(c),c[6] == 1);
                 detail(lines,I18n.format("xf.miner.pending_help"));
             } else detail(lines,I18n.format(!state.getString("SelectionError").isEmpty() ? state.getString("SelectionError")
                     : state.getBoolean("Configured") ? "xf.miner.resume_saved" : "xf.miner.use_wands"));
@@ -128,5 +142,10 @@ public final class GUIMinerNPC extends GuiContainer {
         ((GuiButton)buttonList.get(4)).enabled = scroll+13 < detailLines;
         if (mouseX-guiLeft >= 184 && mouseY-guiTop >= 206 && mouseY-guiTop < 226)
             drawHoveringText(fontRendererObj.listFormattedStringToWidth(I18n.format("xf.miner.station_controls")+" "+I18n.format("xf.miner.area_controls"),260),mouseX-guiLeft,mouseY-guiTop,fontRendererObj);
+    }
+    private void bounds(List<String> lines, int[] p, boolean down) {
+        detail(lines,I18n.format(down ? "xf.miner.depth_down" : "xf.miner.depth_corners"));
+        long volume = ((long)p[5]-p[3]+1)*((long)p[6]-p[4]+1)*((long)p[7]-p[8]+1);
+        detail(lines,I18n.format("xf.miner.depth_bounds",p[7],p[8],volume));
     }
 }

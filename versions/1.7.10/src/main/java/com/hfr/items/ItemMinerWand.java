@@ -72,7 +72,14 @@ public final class ItemMinerWand extends Item {
     /** Never turn an incomplete, invalid or foreign selection into an implicit resume. */
     public static Selection selection(EntityPlayer player, EntityFactionMiner miner) {
         int[] selected = new int[0];
+        long revision = -1;
         boolean foreign = false;
+        for (int slot = -1; slot < player.inventory.mainInventory.length; slot++) {
+            ItemStack stack = slot < 0 ? player.inventory.getItemStack() : player.inventory.mainInventory[slot];
+            if (bound(stack,miner) && stack.getItem() == ModItems.miner_area_wand
+                    && (stack.getTagCompound().getBoolean("A") || stack.getTagCompound().getBoolean("B")))
+                revision = Math.max(revision,stack.getTagCompound().getLong("SelectionRevision"));
+        }
         for (int slot = -1; slot < player.inventory.mainInventory.length; slot++) {
             ItemStack stack = slot < 0 ? player.inventory.getItemStack() : player.inventory.mainInventory[slot];
             if (stack == null || stack.getItem() != ModItems.miner_area_wand || !stack.hasTagCompound()) continue;
@@ -82,6 +89,8 @@ public final class ItemMinerWand extends Item {
                 continue;
             }
             if (!tag.getBoolean("A") && !tag.getBoolean("B")) continue;
+            long candidateRevision = tag.getLong("SelectionRevision");
+            if (bound(stack,miner) && candidateRevision < revision) continue;
             if (!bound(stack, miner)) return new Selection(new int[0], "xf.miner.selection_dimension");
             if (!tag.getBoolean("A") || !tag.getBoolean("B")) return new Selection(new int[0], "xf.miner.select_area");
             for (String prefix : new String[] {"A", "B"}) {
@@ -112,10 +121,13 @@ public final class ItemMinerWand extends Item {
         EntityPlayer player = event.entityPlayer; ItemStack held = player.getHeldItem();
         if (held == null || !(held.getItem() instanceof ItemMinerWand)) return;
         if (event.action != PlayerInteractEvent.Action.LEFT_CLICK_BLOCK && event.action != PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK) return;
-        boolean alreadyCanceled = event.isCanceled();
         event.setCanceled(true); // Both logical sides: no chest open, placement or client breaking animation.
-        if (player.worldObj.isRemote || alreadyCanceled) return;
-        if (!(player instanceof EntityPlayerMP) || !held.hasTagCompound()) return;
+        // Native packets may follow a custom click. They must never resample Sneak or overwrite it.
+    }
+    public static void select(EntityPlayerMP player, int x, int y, int z, boolean a, boolean down) {
+        ItemStack held = player.getHeldItem();
+        if (player.worldObj.isRemote || held == null || !(held.getItem() instanceof ItemMinerWand)) return;
+        if (!held.hasTagCompound()) return;
         NBTTagCompound tag = held.getTagCompound();
         EntityFactionMiner miner = null;
         if (player.dimension == tag.getInteger("Dimension")) {
@@ -128,27 +140,39 @@ public final class ItemMinerWand extends Item {
             }
         }
         if (miner == null || !miner.maySelect(player)) { player.addChatMessage(new ChatComponentTranslation("xf.miner.wand_denied")); return; }
-        if (!player.worldObj.blockExists(event.x,event.y,event.z) || player.getDistanceSq(event.x+.5,event.y+.5,event.z+.5) > 64) return;
+        if (y < 0 || y >= player.worldObj.getHeight() || Math.abs((long)x) > 30000000 || Math.abs((long)z) > 30000000
+                || !player.worldObj.blockExists(x,y,z) || player.getDistanceSq(x+.5,y+.5,z+.5) > 64) return;
         tag.setInteger("Entity",miner.getEntityId());
         ItemMinerWand wand = (ItemMinerWand)held.getItem();
         if (!wand.area) {
-            if (event.action == PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK)
-                player.addChatMessage(new ChatComponentTranslation(miner.selectStation(player,event.x,event.y,event.z), event.x,event.y,event.z, player.dimension));
+            if (!a) player.addChatMessage(new ChatComponentTranslation(miner.selectStation(player,x,y,z), x,y,z, player.dimension));
             return;
         }
-        if (!com.hfr.worker.WorkerAccess.ownsLand(player.worldObj,event.x,event.z,miner.getFactionId())) {
+        if (!com.hfr.worker.WorkerAccess.ownsLand(player.worldObj,x,z,miner.getFactionId())) {
             player.addChatMessage(new ChatComponentTranslation("xf.worker.denied")); return;
         }
-        boolean a = event.action == PlayerInteractEvent.Action.LEFT_CLICK_BLOCK;
         String prefix = a ? "A" : "B";
-        tag.setBoolean(prefix,true); tag.setInteger(prefix+"X",event.x); tag.setInteger(prefix+"Y",event.y); tag.setInteger(prefix+"Z",event.z);
-        if (!a) tag.setBoolean("Down",player.isSneaking());
+        tag.setBoolean(prefix,true); tag.setInteger(prefix+"X",x); tag.setInteger(prefix+"Y",y); tag.setInteger(prefix+"Z",z);
+        if (!a) tag.setBoolean("Down",down);
+        long observed = tag.getLong("SelectionRevision");
+        ItemStack cursor = player.inventory.getItemStack();
+        if (bound(cursor,miner)) observed = Math.max(observed,cursor.getTagCompound().getLong("SelectionRevision"));
+        for (ItemStack stack : player.inventory.mainInventory)
+            if (bound(stack,miner)) observed = Math.max(observed,stack.getTagCompound().getLong("SelectionRevision"));
+        tag.setLong("SelectionRevision",miner.nextSelectionRevision(observed));
         player.inventory.markDirty(); player.inventoryContainer.detectAndSendChanges();
-        player.addChatMessage(new ChatComponentTranslation("xf.miner.corner",prefix,event.x,event.y,event.z));
+        if (player.openContainer != player.inventoryContainer) player.openContainer.detectAndSendChanges();
+        player.addChatMessage(new ChatComponentTranslation("xf.miner.corner",prefix,x,y,z));
         if (tag.getBoolean("A") && tag.getBoolean("B")) {
             int[] c = corners(tag), p = plan(c);
             player.addChatMessage(new ChatComponentTranslation("xf.miner.selection",p[3],p[8],p[4],p[5],p[7],p[6],volume(c)));
+            player.addChatMessage(new ChatComponentTranslation(c[6] == 1 ? "xf.miner.depth_down" : "xf.miner.depth_corners"));
+            player.addChatMessage(new ChatComponentTranslation("xf.miner.depth_bounds",p[7],p[8],volume(c)));
+            miner.logSelection("accepted",c[6] == 1,p);
         }
+        if (player.openContainer instanceof com.hfr.inventory.container.ContainerMinerNPC
+                && ((com.hfr.inventory.container.ContainerMinerNPC)player.openContainer).worker == miner)
+            com.hfr.packet.PacketDispatcher.wrapper.sendTo(new com.hfr.packet.builder.MinerSnapshotPacket(miner,player,"",false),player);
     }
     @SideOnly(Side.CLIENT)
     @Override public void addInformation(ItemStack stack, EntityPlayer player, List lines, boolean advanced) {
@@ -162,7 +186,11 @@ public final class ItemMinerWand extends Item {
             NBTTagCompound tag = stack.getTagCompound();
             for (String p : new String[]{"A","B"}) if (tag.getBoolean(p))
                 lines.add(p+": "+tag.getInteger(p+"X")+", "+tag.getInteger(p+"Y")+", "+tag.getInteger(p+"Z"));
-            if (tag.getBoolean("A") && tag.getBoolean("B")) lines.add(StatCollector.translateToLocalFormatted("xf.miner.volume",volume(corners(tag))));
+            if (tag.getBoolean("A") && tag.getBoolean("B")) {
+                int[] c = corners(tag), p = plan(c);
+                lines.add(StatCollector.translateToLocal(c[6] == 1 ? "xf.miner.depth_down" : "xf.miner.depth_corners"));
+                lines.add(StatCollector.translateToLocalFormatted("xf.miner.depth_bounds",p[7],p[8],volume(c)));
+            }
         }
     }
 }

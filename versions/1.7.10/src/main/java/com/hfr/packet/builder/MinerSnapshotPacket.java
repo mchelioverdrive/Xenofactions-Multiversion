@@ -20,6 +20,12 @@ public final class MinerSnapshotPacket implements IMessage {
         state.setIntArray("Selection", selected.corners); state.setString("SelectionError", selected.error);
         state.setBoolean("ActionReply", actionReply);
         state.setBoolean("ConfirmReplacement", ((com.hfr.inventory.container.ContainerMinerNPC)player.openContainer).replacement != null);
+        com.hfr.inventory.container.ContainerMinerNPC container = (com.hfr.inventory.container.ContainerMinerNPC)player.openContainer;
+        state.setLong("Sequence",++container.snapshotSequence);
+        if (container.replacement != null) {
+            state.setIntArray("ProposedPlan",container.replacement.proposedPlan());
+            state.setBoolean("ProposedDown",container.replacement.down);
+        }
         state.setInteger("Window", player.openContainer.windowId);
     }
     public void fromBytes(ByteBuf buf) {
