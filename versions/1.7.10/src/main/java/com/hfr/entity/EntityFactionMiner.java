@@ -10,6 +10,8 @@ import com.hfr.util.XFLog;
 import com.hfr.worker.WorkerAccess;
 import com.mojang.authlib.GameProfile;
 import cpw.mods.fml.common.network.internal.FMLNetworkHandler;
+import cpw.mods.fml.common.registry.IEntityAdditionalSpawnData;
+import io.netty.buffer.ByteBuf;
 import net.minecraft.block.Block;
 import net.minecraft.entity.EntityLiving;
 import net.minecraft.entity.SharedMonsterAttributes;
@@ -34,7 +36,7 @@ import net.minecraft.world.WorldSettings;
 import net.minecraftforge.common.util.FakePlayer;
 
 /** Native persistent worker. Mining uses Forge's survival harvesting path, not generated loot. */
-public final class EntityFactionMiner extends EntityLiving implements IInventory {
+public final class EntityFactionMiner extends EntityLiving implements IInventory, IEntityAdditionalSpawnData {
     public static final int GUI_ID = 42, PLAN_SIZE = 9;
     private UUID factionId, employerId;
     private String employerName = "", status = "idle";
@@ -52,6 +54,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private ItemStack torches;
     private boolean stationAssigned, needsLight;
     private int requiredHarvest = -1;
+    private int targetCursor = -1, searchOffset, supplyCheckTicks;
+    private boolean searchUnloaded;
+    private ItemStack miningTool;
+    private int requestedTools, requestedTorches;
+    private long lastSupplyReminder;
+    private boolean sentSupplyReminder;
 
     public EntityFactionMiner(World world) {
         super(world); setSize(.6F, 1.8F); stepHeight = 1F;
@@ -64,6 +72,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     protected boolean canDespawn() { return false; }
     protected boolean isAIEnabled() { return true; }
+    // FML's 1.7.10 mob spawn packet otherwise leaves the client's random UUID intact.
+    public void writeSpawnData(ByteBuf data) {
+        data.writeLong(getUniqueID().getMostSignificantBits()); data.writeLong(getUniqueID().getLeastSignificantBits());
+    }
+    public void readSpawnData(ByteBuf data) { entityUniqueID = new UUID(data.readLong(), data.readLong()); }
     public void assign(UUID faction, UUID employer, String name) { factionId = faction; employerId = employer; employerName = name; }
     public UUID getFactionId() { return factionId; }
     public boolean mayManage(EntityPlayer player) {
@@ -79,9 +92,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         FMLNetworkHandler.openGui(player, MainRegistry.instance, GUI_ID, worldObj, getEntityId(), 0, 0);
         return true;
     }
-    public void pause() { running = false; status = "paused"; resetPath(); }
-    private void stop(String reason) { running = false; status = reason; resetPath(); }
-    private void resetPath() { getNavigator().clearPathEntity(); pathTicks = blockedTicks = 0; pathDistance = Double.MAX_VALUE; miningProgress = 0; miningBlock = null; }
+    public void pause() { stop("paused"); }
+    private void stop(String reason) {
+        running = false; status = reason; resetPath(); clearRequests();
+    }
+    private void resetPath() { getNavigator().clearPathEntity(); pathTicks = blockedTicks = 0; pathDistance = Double.MAX_VALUE; resetMining(); }
+    private void resetMining() { miningProgress = 0; miningBlock = null; miningTool = null; }
+    private void clearRequests() { requestedTools = requestedTorches = supplyCheckTicks = 0; }
     private String validate(int[] next, boolean area) {
         if (!stationAssigned) return "xf.miner.no_chest";
         if (jobDimension != dimension) return "xf.miner.state.dimension";
@@ -99,13 +116,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!WorkerAccess.ownsLand(worldObj, next[0], next[2], factionId)) return "xf.worker.denied";
         for (int x = next[3]; x <= next[5]; x++) for (int z = next[4]; z <= next[6]; z++)
             if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) return "xf.worker.denied";
-        if (stationInventory(next[0], next[1], next[2]) == null) return "xf.miner.no_chest";
+        if (stationInventory(next[0], next[1], next[2]) == null) return "xf.miner.state." + stationUnavailable(next[0], next[1], next[2]);
         return "";
     }
     public String selectStation(EntityPlayer player, int x, int y, int z) {
         if (!maySelect(player) || !WorkerAccess.ownsLand(worldObj, x, z, factionId)) return "xf.worker.denied";
-        if (Math.abs((long)x) > 30000000 || Math.abs((long)z) > 30000000 || y < 0 || y >= worldObj.getHeight()
-                || stationInventory(x, y, z) == null) return "xf.miner.no_chest";
+        if (Math.abs((long)x) > 30000000 || Math.abs((long)z) > 30000000 || y < 0 || y >= worldObj.getHeight()) return "xf.miner.no_chest";
+        if (stationInventory(x, y, z) == null) return "xf.miner.state." + stationUnavailable(x, y, z);
         int[] next = plan.clone(); next[0] = x; next[1] = y; next[2] = z;
         // An existing area must still fit the replacement station's distance limits.
         String error = configured ? validateArea(next) : "";
@@ -121,6 +138,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!error.isEmpty()) return error;
         if (pendingDrops != null) return "xf.miner.pending_drops";
         pause(); plan = next; cursor = 0; configured = true; returning = hasCargo();
+        targetCursor = -1; searchOffset = 0;
         requiredHarvest = -1; needsLight = false; toolBroken = false;
         employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
         return "xf.miner.area_set";
@@ -130,12 +148,20 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!configured) return "xf.miner.select_area";
         String error = validate(plan, true); if (!error.isEmpty()) return error;
         employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
-        running = true; returning = hasCargo(); status = "working"; resetPath(); return "";
+        if (!running) {
+            running = true; returning = hasCargo(); status = "working"; resetPath();
+            searchOffset = 0;
+        }
+        return "";
     }
     public void onLivingUpdate() {
         super.onLivingUpdate();
         if (worldObj.isRemote || !running || ticksExisted % 10 != 0) return;
-        try { work(); }
+        try {
+            if (supplyCheckTicks > 0) supplyCheckTicks -= 10;
+            else work();
+            updateRequests(); notifySupplies();
+        }
         catch (RuntimeException error) { stop("error"); XFLog.error("Miner stopped: " + getUniqueID(), error); }
         finally { if (actor != null) actor.inventory.mainInventory[0] = null; }
     }
@@ -148,6 +174,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (jobDimension != dimension) { stop("dimension"); return; }
         if (!WorkerAccess.ownsLand(worldObj, plan[0], plan[2], factionId)) { stop("denied"); return; }
         equipCarriedTool();
+        stockTorchesFromCargo();
+        if (suitable(getHeldItem())) requestedTools = 0;
+        if (torchCount() > 0) { requestedTorches = 0; needsLight = false; }
+        int totalWork = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
+        if (returning && !hasCargo() && cursor < totalWork && suitable(getHeldItem()) && (!needsLight || torchCount() > 0))
+            returning = false;
         if (returning || !suitable(getHeldItem()) || cargoFull() || needsLight && torchCount() == 0) { visitChest(); return; }
         if (pendingDrops != null) {
             int x = pendingDrops[0], y = pendingDrops[1], z = pendingDrops[2];
@@ -160,25 +192,29 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int width = plan[5] - plan[3] + 1, length = plan[6] - plan[4] + 1, layer = width * length;
         int total = layer * (plan[7] - plan[8] + 1);
         for (int scans = 0; scans < 64 && cursor < total; scans++) {
-            int x = plan[3] + cursor % width, z = plan[4] + cursor / width % length, y = plan[7] - cursor / layer;
+            int workCursor = targetCursor >= cursor && targetCursor / layer == cursor / layer ? targetCursor : cursor;
+            int x = plan[3] + workCursor % width, z = plan[4] + workCursor / width % length, y = plan[7] - workCursor / layer;
             if (!worldObj.blockExists(x, y, z)) { status = "chunk"; return; }
             Block block = worldObj.getBlock(x, y, z);
-            if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch) { cursor++; miningProgress = 0; miningBlock = null; continue; }
+            if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch) { advance(workCursor); continue; }
             if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) { stop("denied"); return; }
             if (block == net.minecraft.init.Blocks.bedrock || block.getBlockHardness(worldObj, x, y, z) < 0) {
-                cursor++; resetPath(); continue;
+                advance(workCursor); continue;
             }
             if (BuilderPlacement.protectedBlock(worldObj, x, y, z)
                     || worldObj.getTileEntity(x, y, z) != null) { stop("protected"); return; }
             if (block.getMaterial().isLiquid()) { stop("liquid"); return; }
-            if (!moveNear(x, y + 1, z)) return;
-            net.minecraft.util.MovingObjectPosition hit = worldObj.func_147447_a(
-                    net.minecraft.util.Vec3.createVectorHelper(posX, posY + getEyeHeight(), posZ),
-                    net.minecraft.util.Vec3.createVectorHelper(x + .5, y + .5, z + .5), false, true, false);
-            if (hit != null && (hit.blockX != x || hit.blockY != y || hit.blockZ != z)) {
-                miningProgress = 0; blockedTicks += 10;
-                if (blockedTicks >= 100) stop("unreachable");
-                else { status = "travel"; navigate(x, y + 1, z); }
+            if (!moveNear(x, y + 1, z)) {
+                if ("unreachable".equals(status)) findAccessibleTarget(layer);
+                return;
+            }
+            status = "travel";
+            if (!visible(x, y, z)) {
+                if ("chunk".equals(status)) return;
+                resetMining(); blockedTicks += 10;
+                // A row-order target can be hidden behind another block in the same layer.
+                // Search that layer without skipping any remaining work.
+                if (!findAccessibleTarget(layer) && "travel".equals(status)) navigate(x, y + 1, z);
                 return;
             }
             blockedTicks = 0;
@@ -188,13 +224,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             int meta = worldObj.getBlockMetadata(x, y, z);
             if (!block.canHarvestBlock(player, meta)) {
                 requiredHarvest = Math.max(0, block.getHarvestLevel(meta));
-                player.inventory.mainInventory[0] = null; returning = true; status = "tool_level"; return;
+                player.inventory.mainInventory[0] = null; returning = true; status = "tool_level"; resetMining(); return;
             }
             requiredHarvest = -1;
             if (!lightWorkArea()) { player.inventory.mainInventory[0] = null; return; }
-            if (miningBlock != block || miningMeta != meta) { miningBlock = block; miningMeta = meta; miningProgress = 0; }
+            if (miningBlock != block || miningMeta != meta || !ItemStack.areItemStacksEqual(miningTool, getHeldItem())) {
+                miningBlock = block; miningMeta = meta; miningTool = getHeldItem().copy(); miningProgress = 0;
+            }
             status = "mining"; swingItem();
             miningProgress += block.getPlayerRelativeBlockHardness(player, worldObj, x, y, z) * 10;
+            if (miningProgress <= 0) { stop("unmineable"); return; }
             if (miningProgress < 1) return;
             boolean harvested = false;
             com.hfr.worker.MinerHarvestDrops.begin(player,x,y,z);
@@ -206,12 +245,52 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             miningProgress = 0; miningBlock = null;
             if (!harvested) { stop("protected"); return; }
             if (!collectDrops(x, y, z)) { pendingDrops = new int[] {x, y, z}; returning = true; }
-            cursor++; resetPath();
+            advance(workCursor);
             if (getHeldItem() == null) { returning = toolBroken = true; status = "tool_broken"; }
             if (cargoFull()) returning = true;
             return;
         }
         if (cursor >= total) { returning = true; visitChest(); }
+        else status = "scanning";
+    }
+    private void advance(int minedCursor) {
+        if (minedCursor == cursor) cursor++;
+        targetCursor = -1; searchOffset = 0; resetPath();
+    }
+    private boolean visible(int x, int y, int z) {
+        int px = net.minecraft.util.MathHelper.floor_double(posX), pz = net.minecraft.util.MathHelper.floor_double(posZ);
+        for (int cx = Math.min(px, x) >> 4; cx <= (Math.max(px, x) >> 4); cx++)
+            for (int cz = Math.min(pz, z) >> 4; cz <= (Math.max(pz, z) >> 4); cz++)
+                if (!worldObj.blockExists(cx << 4, y, cz << 4)) { status = "chunk"; return false; }
+        net.minecraft.util.MovingObjectPosition hit = worldObj.func_147447_a(
+                net.minecraft.util.Vec3.createVectorHelper(posX, posY + getEyeHeight(), posZ),
+                net.minecraft.util.Vec3.createVectorHelper(x + .5, y + .5, z + .5), false, true, false);
+        return hit == null || hit.blockX == x && hit.blockY == y && hit.blockZ == z;
+    }
+    private boolean findAccessibleTarget(int layer) {
+        int width = plan[5] - plan[3] + 1, end = (cursor / layer + 1) * layer;
+        if (searchOffset == 0) searchUnloaded = false;
+        for (int scans = 0; scans < 64 && cursor + searchOffset < end; scans++, searchOffset++) {
+            int candidate = cursor + searchOffset;
+            int x = plan[3] + candidate % width, z = plan[4] + candidate / width % (plan[6] - plan[4] + 1), y = plan[7] - candidate / layer;
+            if (getDistanceSq(x + .5, y + 1, z + .5) > 9) continue;
+            if (!worldObj.blockExists(x, y, z)) { searchUnloaded = true; continue; }
+            Block block = worldObj.getBlock(x, y, z);
+            if (worldObj.isAirBlock(x, y, z) || block == net.minecraft.init.Blocks.torch || block.getMaterial().isLiquid()
+                    || block.getBlockHardness(worldObj, x, y, z) < 0 || worldObj.getTileEntity(x, y, z) != null
+                    || !WorkerAccess.ownsLand(worldObj, x, z, factionId) || BuilderPlacement.protectedBlock(worldObj, x, y, z)) continue;
+            status = "searching";
+            if (!visible(x, y, z)) { if ("chunk".equals(status)) searchUnloaded = true; continue; }
+            targetCursor = candidate; searchOffset = 0; resetPath(); status = "working"; return true;
+        }
+        if (cursor + searchOffset >= end) {
+            searchOffset = 0;
+            if (searchUnloaded) status = "chunk";
+            else if (blockedTicks >= 100 || pathTicks >= 100 || "unreachable".equals(status)) stop("unreachable");
+            else status = "travel";
+        }
+        else status = "searching";
+        return false;
     }
     private FakePlayer actor() {
         if (actor == null) {
@@ -226,10 +305,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean moveNear(int x, int y, int z) {
         double distance = getDistanceSq(x + .5, y, z + .5);
-        if (distance <= 9) { getNavigator().clearPathEntity(); pathTicks = 0; pathDistance = Double.MAX_VALUE; return true; }
+        if (distance <= 9) {
+            // Keep a visibility-recovery path alive until the selected block is exposed.
+            if (blockedTicks == 0) getNavigator().clearPathEntity();
+            pathTicks = 0; pathDistance = Double.MAX_VALUE; return true;
+        }
         miningProgress = 0;
         if (distance < pathDistance - .1) { pathTicks = 0; pathDistance = distance; } else pathTicks += 10;
-        if (pathTicks >= 100) { stop("unreachable"); return false; }
+        if (pathTicks >= 100) { status = "unreachable"; getNavigator().clearPathEntity(); return false; }
         if (getNavigator().noPath() && !navigate(x,y,z)) return false;
         status = "travel"; return false;
     }
@@ -243,12 +326,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (!worldObj.blockExists(cx<<4,Math.max(0,Math.min(worldObj.getHeight()-1,(int)posY)),cz<<4)) {
                     getNavigator().clearPathEntity(); pathTicks = 0; status = "chunk"; return false;
                 }
-        getNavigator().tryMoveToXYZ(x+.5,y,z+.5,1); return true;
+        if (!getNavigator().tryMoveToXYZ(x+.5,y,z+.5,1)) { status = "unreachable"; return false; }
+        return true;
     }
     private void visitChest() {
         if (!worldObj.blockExists(plan[0], plan[1], plan[2])) { status = "chunk"; return; }
         IInventory chest = stationInventory(plan[0], plan[1], plan[2]);
-        if (chest == null) { status = "no_chest"; return; }
+        if (chest == null) { status = stationUnavailable(plan[0], plan[1], plan[2]); return; }
         if (!moveNear(plan[0], plan[1], plan[2])) return;
         equipCarriedTool();
         stockTorchesFromCargo();
@@ -269,8 +353,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 ItemStack stack = chest.getStackInSlot(i);
                 if (suitable(stack)) { setCurrentItemOrArmor(0, chest.decrStackSize(i, 1)); chest.markDirty(); break; }
             }
-            if (getHeldItem() == null) { status = requiredHarvest >= 0 ? "tool_level" : "no_tool"; return; }
+            if (!suitable(getHeldItem())) {
+                requestedTools = 1; status = requiredHarvest >= 0 ? "tool_level" : "no_tool";
+                supplyCheckTicks = 40; return;
+            }
         }
+        requestedTools = 0;
         for (int i = firstSlot(chest); i < chest.getSizeInventory() && torchCount() < 32; i++) {
             ItemStack stack = chest.getStackInSlot(i);
             if (!isTorch(stack)) continue;
@@ -280,7 +368,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (taken != null) { if (torches == null) torches = taken; else torches.stackSize += taken.stackSize; }
             chest.markDirty();
         }
-        if (needsLight && torchCount() == 0) { status = "no_torches"; return; }
+        if (needsLight && torchCount() == 0) {
+            requestedTorches = 1; status = "no_torches"; supplyCheckTicks = 40; return;
+        }
+        requestedTorches = 0;
         returning = false; status = "working"; resetPath();
     }
     public static boolean pickaxe(ItemStack stack) {
@@ -308,13 +399,29 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return (IInventory)worldObj.getTileEntity(x, y, z);
     }
+    private String stationUnavailable(int x, int y, int z) {
+        if (!worldObj.blockExists(x, y, z)) return "chunk";
+        if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) return "denied";
+        if (!station(worldObj.getTileEntity(x, y, z))) return "no_chest";
+        if (worldObj.getTileEntity(x, y, z) instanceof net.minecraft.tileentity.TileEntityChest) {
+            Block block = worldObj.getBlock(x, y, z);
+            for (int[] d : new int[][] {{-1,0},{1,0},{0,-1},{0,1}}) {
+                if (!worldObj.blockExists(x + d[0], y, z + d[1])) return "chunk";
+                if (worldObj.getBlock(x + d[0], y, z + d[1]) == block
+                        && !WorkerAccess.ownsLand(worldObj, x + d[0], z + d[1], factionId)) return "denied";
+            }
+            if (block instanceof net.minecraft.block.BlockChest) return "station_blocked";
+        }
+        return "no_chest";
+    }
     private boolean suitable(ItemStack stack) {
         if (!pickaxe(stack) || stack.isItemStackDamageable() && stack.getItemDamage() >= stack.getMaxDamage()) return false;
         if (requiredHarvest < 0) return true;
         if (stack.getItem().getHarvestLevel(stack, "pickaxe") < requiredHarvest) return false;
         int width = plan[5]-plan[3]+1, length = plan[6]-plan[4]+1;
         if (!configured || employerId == null || width <= 0 || length <= 0) return false;
-        int x = plan[3]+cursor%width, z = plan[4]+cursor/width%length, y = plan[7]-cursor/(width*length);
+        int current = targetCursor >= cursor && targetCursor/(width*length) == cursor/(width*length) ? targetCursor : cursor;
+        int x = plan[3]+current%width, z = plan[4]+current/width%length, y = plan[7]-current/(width*length);
         if (!worldObj.blockExists(x,y,z)) return false;
         FakePlayer player = actor(); ItemStack previous = player.inventory.mainInventory[0];
         player.inventory.mainInventory[0] = stack;
@@ -340,8 +447,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     public static boolean isTorch(ItemStack stack) { return stack != null && stack.stackSize > 0 && stack.getItem() == net.minecraft.item.Item.getItemFromBlock(net.minecraft.init.Blocks.torch); }
     private int torchCount() { return torches == null ? 0 : torches.stackSize; }
     private void stockTorchesFromCargo() {
-        if (torches != null) return;
-        for (int i = 0; i < cargo.length; i++) if (isTorch(cargo[i])) { torches = cargo[i]; cargo[i] = null; return; }
+        for (int i = 0; i < cargo.length; i++) if (isTorch(cargo[i])) {
+            if (torches == null) { torches = cargo[i]; cargo[i] = null; }
+            else if (ItemStack.areItemStackTagsEqual(torches, cargo[i])) {
+                int amount = Math.min(cargo[i].stackSize, Math.max(0, torches.getMaxStackSize() - torchCount()));
+                torches.stackSize += amount; cargo[i].stackSize -= amount;
+                if (cargo[i].stackSize == 0) cargo[i] = null;
+            }
+        }
     }
     private boolean lightWorkArea() {
         int px = net.minecraft.util.MathHelper.floor_double(posX), py = net.minecraft.util.MathHelper.floor_double(posY), pz = net.minecraft.util.MathHelper.floor_double(posZ);
@@ -415,12 +528,64 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean hasCargo() { for (ItemStack stack : cargo) if (stack != null && stack.stackSize > 0) return true; return false; }
     private boolean cargoFull() { for (ItemStack stack : cargo) if (stack == null) return false; return true; }
+    private void updateRequests() {
+        requestedTools = requestedTorches = 0;
+        if (worldObj.isRemote || !configured || !authorized() || jobDimension != dimension) return;
+        int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
+        if (cursor >= total && pendingDrops == null) return;
+        boolean tool = suitable(getHeldItem());
+        int lights = torchCount();
+        for (ItemStack stack : cargo) {
+            if (!tool && suitable(stack)) tool = true;
+            if (isTorch(stack)) lights += stack.stackSize;
+        }
+        if (tool && (!needsLight || lights > 0)) return;
+        IInventory station = stationAssigned ? stationInventory(plan[0], plan[1], plan[2]) : null;
+        // An inaccessible/unloaded station is an access problem, not proof of missing supplies.
+        if (station == null) return;
+        for (int i = firstSlot(station); i < station.getSizeInventory(); i++) {
+            ItemStack stack = station.getStackInSlot(i);
+            if (!tool && suitable(stack)) tool = true;
+            if (isTorch(stack)) lights += stack.stackSize;
+        }
+        requestedTools = tool ? 0 : 1;
+        requestedTorches = needsLight && lights == 0 ? 1 : 0;
+    }
+    private void notifySupplies() {
+        long now = System.nanoTime();
+        if (!running || requestedTools == 0 && requestedTorches == 0
+                || sentSupplyReminder && now - lastSupplyReminder < 60000000000L) return;
+        EntityPlayerMP recipient = null;
+        for (Object value : MinecraftServer.getServer().getConfigurationManager().playerEntityList) {
+            EntityPlayerMP player = (EntityPlayerMP)value;
+            if (player.getUniqueID().equals(employerId) && WorkerAccess.member(player, factionId)
+                    && player.playerNetServerHandler.netManager.isChannelOpen()) { recipient = player; break; }
+        }
+        if (recipient == null) return;
+        // One private message per Miner per minute, including changing requests and reopen/Start spam.
+        ChatComponentTranslation tool = new ChatComponentTranslation(requiredHarvest >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick", requiredHarvest);
+        ChatComponentTranslation light = new ChatComponentTranslation("xf.miner.need_torches", requestedTorches);
+        ChatComponentTranslation request = requestedTools > 0 ? tool : light;
+        if (requestedTools > 0 && requestedTorches > 0) request = new ChatComponentTranslation("xf.miner.both_requests", tool, light);
+        recipient.addChatMessage(new ChatComponentTranslation("xf.miner.supply_notice", getCommandSenderName(),
+                getUniqueID().toString().substring(0, 8), request,
+                new ChatComponentTranslation("xf.miner.supplies")));
+        lastSupplyReminder = now; sentSupplyReminder = true;
+    }
     public NBTTagCompound snapshot() {
+        updateRequests();
         NBTTagCompound tag = new NBTTagCompound(); tag.setIntArray("Plan", plan); tag.setBoolean("Configured", configured); tag.setInteger("Dimension", jobDimension);
         tag.setBoolean("StationAssigned", stationAssigned);
-        tag.setInteger("PickaxesRequested", suitable(getHeldItem()) ? 0 : 1);
+        tag.setInteger("PickaxesRequested", requestedTools);
         tag.setInteger("HarvestLevel", requiredHarvest);
-        tag.setInteger("TorchesRequested", Math.max(0, 32 - torchCount()));
+        tag.setInteger("TorchesRequested", requestedTorches);
+        tag.setInteger("TorchRestock", Math.max(0, 32 - torchCount()));
+        tag.setInteger("WorkCursor", targetCursor);
+        tag.setString("Task", !configured ? "unassigned" : returning ? "storage" : pendingDrops != null ? "drops" : "excavate");
+        int width = plan[5] - plan[3] + 1, length = plan[6] - plan[4] + 1;
+        int current = targetCursor >= cursor ? targetCursor : cursor;
+        if (configured && width > 0 && length > 0 && current < width * length * (plan[7] - plan[8] + 1))
+            tag.setIntArray("Target", new int[] {plan[3] + current % width, plan[7] - current / (width * length), plan[4] + current / width % length});
         tag.setBoolean("Running", running); tag.setString("Status", status); tag.setInteger("Cursor", cursor);
         int count = 0; for (ItemStack stack : cargo) if (stack != null) count += stack.stackSize; tag.setInteger("Cargo", count);
         if (getHeldItem() != null) tag.setTag("Tool", getHeldItem().writeToNBT(new NBTTagCompound()));
@@ -450,6 +615,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         torches = tag.hasKey("Torches") ? ItemStack.loadItemStackFromNBT(tag.getCompoundTag("Torches")) : null;
         requiredHarvest = tag.hasKey("RequiredHarvest") ? tag.getInteger("RequiredHarvest") : -1;
         cursor = Math.max(0, job.getInteger("Cursor")); running = false; status = "paused"; returning = tag.getBoolean("Returning"); toolBroken = tag.getBoolean("ToolBroken");
+        int layer = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1);
+        targetCursor = job.hasKey("WorkCursor") ? job.getInteger("WorkCursor") : -1;
+        if (layer <= 0 || targetCursor < cursor || targetCursor / layer != cursor / layer) targetCursor = -1;
         int[] site = tag.getIntArray("PendingDrops"); pendingDrops = site.length == 3 ? site : null;
         Arrays.fill(cargo, null); NBTTagList list = tag.getTagList("Cargo", 10);
         for (int i = 0; i < list.tagCount(); i++) { NBTTagCompound entry = list.getCompoundTagAt(i); int slot = entry.getByte("Slot") & 255; if (slot < cargo.length) cargo[slot] = ItemStack.loadItemStackFromNBT(entry); }
@@ -479,7 +647,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     public String getInventoryName() { return "xf.miner.title"; }
     public boolean hasCustomInventoryName() { return false; }
     public int getInventoryStackLimit() { return 64; }
-    public void markDirty() { miningProgress = 0; miningBlock = null; }
+    // Cargo/torch slot synchronization must not restart a partly mined block.
+    // The work loop compares the actual tool, target, block and metadata instead.
+    public void markDirty() { supplyCheckTicks = 0; }
     public boolean isUseableByPlayer(EntityPlayer player) { return mayManage(player); }
     public void openInventory() { }
     public void closeInventory() { }

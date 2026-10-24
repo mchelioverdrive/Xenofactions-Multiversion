@@ -119,10 +119,13 @@ public class ClientProxy extends ServerProxy
 
     @Override public void receiveMiner(final INetHandler handler, final int id, final String uuid, final NBTTagCompound state, final String feedback) {
         final Minecraft mc = Minecraft.getMinecraft();
+        final World receiving = mc.theWorld;
         mc.func_152344_a(() -> {
-            if (mc.getNetHandler() == handler && mc.currentScreen instanceof com.hfr.inventory.gui.GUIMinerNPC) {
+            if (mc.getNetHandler() == handler && receiving != null && mc.theWorld == receiving && mc.thePlayer != null
+                    && mc.currentScreen instanceof com.hfr.inventory.gui.GUIMinerNPC) {
                 com.hfr.inventory.gui.GUIMinerNPC gui = (com.hfr.inventory.gui.GUIMinerNPC)mc.currentScreen;
-                if (gui.matches(id, uuid)) gui.receive(state, feedback);
+                if (mc.thePlayer.openContainer == gui.inventorySlots && state != null
+                        && state.getInteger("Window") == gui.inventorySlots.windowId && gui.matches(id, uuid)) gui.receive(state, feedback);
             }
         });
     }

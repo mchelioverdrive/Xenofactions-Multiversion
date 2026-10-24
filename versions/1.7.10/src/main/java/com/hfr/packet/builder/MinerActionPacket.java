@@ -10,19 +10,19 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayerMP;
 
 public final class MinerActionPacket implements IMessage {
-    private int id, action;
+    private int id, action, window;
     private String uuid = "";
     public MinerActionPacket() { }
-    public MinerActionPacket(EntityFactionMiner worker, int action) {
-        id = worker.getEntityId(); uuid = worker.getUniqueID().toString(); this.action = action;
+    public MinerActionPacket(EntityFactionMiner worker, int window, int action) {
+        id = worker.getEntityId(); uuid = worker.getUniqueID().toString(); this.window = window; this.action = action;
     }
     public void fromBytes(ByteBuf buf) {
-        id = buf.readInt(); uuid = ByteBufUtils.readUTF8String(buf); action = buf.readUnsignedByte();
+        id = buf.readInt(); uuid = ByteBufUtils.readUTF8String(buf); window = buf.readInt(); action = buf.readUnsignedByte();
         if (uuid.length() != 36 || action > 4) throw new IllegalArgumentException("Invalid miner action");
         if (buf.isReadable()) throw new IllegalArgumentException("Trailing miner data");
     }
     public void toBytes(ByteBuf buf) {
-        buf.writeInt(id); ByteBufUtils.writeUTF8String(buf, uuid); buf.writeByte(action);
+        buf.writeInt(id); ByteBufUtils.writeUTF8String(buf, uuid); buf.writeInt(window); buf.writeByte(action);
     }
     public static final class Handler extends BuilderServerHandler<MinerActionPacket> {
         protected IMessage handle(MinerActionPacket message, MessageContext context) {
@@ -30,6 +30,7 @@ public final class MinerActionPacket implements IMessage {
             Entity entity = player.worldObj.getEntityByID(message.id);
             if (!(entity instanceof EntityFactionMiner) || !entity.getUniqueID().toString().equals(message.uuid)
                     || !(player.openContainer instanceof ContainerMinerNPC)
+                    || player.openContainer.windowId != message.window
                     || ((ContainerMinerNPC)player.openContainer).worker != entity) return null;
             EntityFactionMiner worker = (EntityFactionMiner)entity;
             if (!worker.mayManage(player)) return null;
