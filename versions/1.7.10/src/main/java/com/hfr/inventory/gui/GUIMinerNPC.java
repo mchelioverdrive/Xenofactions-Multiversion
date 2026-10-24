@@ -25,6 +25,7 @@ public final class GUIMinerNPC extends GuiContainer {
     private NBTTagCompound state;
     private String feedback = "";
     private boolean confirm;
+    private GuiButton startButton;
     private int screenTicks, lastSnapshotTick = -1, scroll, detailLines;
     public GUIMinerNPC(InventoryPlayer player, EntityFactionMiner worker) {
         super(new ContainerMinerNPC(player,worker)); this.worker = worker; xSize = 320; ySize = 232;
@@ -32,14 +33,16 @@ public final class GUIMinerNPC extends GuiContainer {
     public boolean matches(int id, String uuid) { return worker.getEntityId() == id && worker.getUniqueID().toString().equals(uuid); }
     public void receive(NBTTagCompound state, String feedback) {
         this.state = state; lastSnapshotTick = screenTicks;
-        if (!feedback.isEmpty()) { this.feedback = feedback; scroll = 0; }
+        if (state.getBoolean("ActionReply") || !feedback.isEmpty()) { this.feedback = feedback; scroll = 0; }
+        confirm = state.getBoolean("ConfirmReplacement");
+        if (startButton != null) startButton.displayString = I18n.format(confirm ? "xf.miner.confirm" : "xf.miner.start");
     }
     public void initGui() {
-        super.initGui(); buttonList.clear(); confirm = false;
-        buttonList.add(new GuiButtonExt(1,guiLeft+184,guiTop+158,61,20,I18n.format("xf.miner.start")));
-        buttonList.add(new GuiButtonExt(2,guiLeft+251,guiTop+158,61,20,I18n.format("gui.builder.pause")));
-        buttonList.add(new GuiButtonExt(3,guiLeft+184,guiTop+182,128,20,I18n.format("xf.miner.wands")));
-        buttonList.add(new GuiButtonExt(4,guiLeft+184,guiTop+206,128,20,I18n.format("xf.miner.assign")));
+        super.initGui(); buttonList.clear();
+        startButton = new GuiButtonExt(1,guiLeft+184,guiTop+158,128,20,I18n.format(confirm ? "xf.miner.confirm" : "xf.miner.start"));
+        buttonList.add(startButton);
+        buttonList.add(new GuiButtonExt(2,guiLeft+184,guiTop+182,128,20,I18n.format("gui.builder.pause")));
+        buttonList.add(new GuiButtonExt(3,guiLeft+184,guiTop+206,128,20,I18n.format("xf.miner.wands")));
         buttonList.add(new GuiButtonExt(5,guiLeft+272,guiTop+5,19,14,"\u25b2"));
         buttonList.add(new GuiButtonExt(6,guiLeft+293,guiTop+5,19,14,"\u25bc"));
         request(0);
@@ -47,11 +50,7 @@ public final class GUIMinerNPC extends GuiContainer {
     private void request(int action) { PacketDispatcher.wrapper.sendToServer(new MinerActionPacket(worker,inventorySlots.windowId,action)); }
     protected void actionPerformed(GuiButton button) {
         if (button.id == 5 || button.id == 6) { scroll = Math.max(0, Math.min(Math.max(0,detailLines-13),scroll+(button.id == 5 ? -5 : 5))); return; }
-        if (button.id == 4 && !confirm) {
-            confirm = true; button.displayString = I18n.format("xf.miner.confirm"); return;
-        }
-        feedback = ""; request(button.id); confirm = false;
-        ((GuiButton)buttonList.get(3)).displayString = I18n.format("xf.miner.assign");
+        request(button.id == 1 && confirm ? 4 : button.id);
     }
     public void updateScreen() {
         super.updateScreen();
@@ -98,35 +97,36 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
-            int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
-            detail(lines,I18n.format("xf.miner.requests"));
-            if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
-            if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
-            if (tools == 0 && lights == 0) detail(lines,I18n.format("xf.miner.no_requests"));
             int[] p = state.getIntArray("Plan"), target = state.getIntArray("Target");
-            detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
-            if (target.length == 3 && "excavate".equals(state.getString("Task"))) detail(lines,coord(target[0],target[1],target[2]));
             detail(lines,I18n.format("xf.miner.station")+":");
             detail(lines,state.getBoolean("StationAssigned") ? "D"+state.getInteger("Dimension")+": "+coord(p[0],p[1],p[2]) : I18n.format("xf.miner.no_chest"));
             detail(lines,I18n.format("xf.miner.area")+":");
             if (state.getBoolean("Configured")) {
                 detail(lines,coord(p[3],p[8],p[4])+" >"); detail(lines,coord(p[5],p[7],p[6]));
             } else detail(lines,I18n.format("xf.miner.no_area"));
+            int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
+            detail(lines,I18n.format("xf.miner.requests"));
+            if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
+            if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
+            if (tools == 0 && lights == 0) detail(lines,I18n.format("xf.miner.no_requests"));
+            detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
+            if (target.length == 3 && "excavate".equals(state.getString("Task"))) detail(lines,coord(target[0],target[1],target[2]));
             int[] c = state.getIntArray("Selection");
             detail(lines,I18n.format("xf.miner.pending")+":");
             if (c.length == 7) {
                 detail(lines,"A: "+coord(c[0],c[1],c[2])); detail(lines,"B: "+coord(c[3],c[4],c[5]));
                 detail(lines,I18n.format("xf.miner.volume",ItemMinerWand.volume(c))+(c[6] == 1 ? " (Y:0)" : ""));
                 detail(lines,I18n.format("xf.miner.pending_help"));
-            } else detail(lines,I18n.format("xf.miner.use_wands"));
+            } else detail(lines,I18n.format(!state.getString("SelectionError").isEmpty() ? state.getString("SelectionError")
+                    : state.getBoolean("Configured") ? "xf.miner.resume_saved" : "xf.miner.use_wands"));
             detail(lines,I18n.format("xf.miner.optional_torches",state.getInteger("TorchRestock")));
             detail(lines,I18n.format("xf.miner.supplies"));
         }
         detailLines = lines.size(); scroll = Math.min(scroll,Math.max(0,detailLines-13));
         for (int i = 0; i < 13 && scroll+i < detailLines; i++) fontRendererObj.drawString(lines.get(scroll+i),184,23+i*10,0xdddddd);
-        ((GuiButton)buttonList.get(4)).enabled = scroll > 0;
-        ((GuiButton)buttonList.get(5)).enabled = scroll+13 < detailLines;
-        if (mouseX-guiLeft >= 184 && mouseY-guiTop >= 182 && mouseY-guiTop < 202)
+        ((GuiButton)buttonList.get(3)).enabled = scroll > 0;
+        ((GuiButton)buttonList.get(4)).enabled = scroll+13 < detailLines;
+        if (mouseX-guiLeft >= 184 && mouseY-guiTop >= 206 && mouseY-guiTop < 226)
             drawHoveringText(fontRendererObj.listFormattedStringToWidth(I18n.format("xf.miner.station_controls")+" "+I18n.format("xf.miner.area_controls"),260),mouseX-guiLeft,mouseY-guiTop,fontRendererObj);
     }
 }

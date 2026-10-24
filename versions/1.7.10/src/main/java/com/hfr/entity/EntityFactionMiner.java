@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.UUID;
 import com.hfr.builder.BuilderPlacement;
 import com.hfr.clowder.Clowder;
+import com.hfr.items.ItemMinerWand;
 import com.hfr.main.MainRegistry;
 import com.hfr.util.XFLog;
 import com.hfr.worker.WorkerAccess;
@@ -130,29 +131,48 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         pause(); plan = next; stationAssigned = true; jobDimension = dimension;
         return "xf.miner.station_set";
     }
-    public String configure(EntityPlayerMP player, int[] proposed) {
-        if (!mayManage(player) || proposed == null || proposed.length != PLAN_SIZE) return "xf.worker.denied";
-        int[] next = proposed.clone();
-        for (int i = 0; i < 3; i++) next[i] = plan[i];
-        String error = validate(next, true);
-        if (!error.isEmpty()) return error;
-        if (pendingDrops != null) return "xf.miner.pending_drops";
+    // Only Start can install a validated, confirmed replacement. Real overflow drops remain collectible.
+    private void configure(int[] next) {
         pause(); plan = next; cursor = 0; configured = true; returning = hasCargo();
         targetCursor = -1; searchOffset = 0;
         requiredHarvest = -1; needsLight = false; toolBroken = false;
-        employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
-        return "xf.miner.area_set";
     }
-    public String start(EntityPlayerMP player) {
-        if (!mayManage(player)) return "xf.worker.denied";
-        if (!configured) return "xf.miner.select_area";
-        String error = validate(plan, true); if (!error.isEmpty()) return error;
+    public static final class Activation {
+        public final String feedback;
+        private final int[] previous, replacement;
+        private Activation(String feedback) { this(feedback, null, null); }
+        private Activation(String feedback, int[] previous, int[] replacement) {
+            this.feedback = feedback; this.previous = previous; this.replacement = replacement;
+        }
+        public boolean needsConfirmation() { return replacement != null; }
+    }
+    public Activation start(EntityPlayerMP player, Activation confirmation) {
+        if (worldObj.isRemote || !mayManage(player)) return new Activation("xf.worker.denied");
+        ItemMinerWand.Selection selected = ItemMinerWand.selection(player, this);
+        if (!selected.error.isEmpty()) return new Activation(selected.error);
+        int[] next = plan;
+        if (selected.corners.length == 7) {
+            next = ItemMinerWand.plan(selected.corners);
+            for (int i = 0; i < 3; i++) next[i] = plan[i];
+        } else if (confirmation != null) return new Activation("xf.miner.selection_changed");
+        else if (!configured) return new Activation("xf.miner.select_area");
+        String error = validate(next, true);
+        if (!error.isEmpty()) return new Activation(error);
+        if (confirmation != null && (!Arrays.equals(confirmation.previous, plan) || !Arrays.equals(confirmation.replacement, next)))
+            return new Activation("xf.miner.selection_changed");
+        if (!configured || !Arrays.equals(next, plan)) {
+            int total = (plan[5]-plan[3]+1) * (plan[6]-plan[4]+1) * (plan[7]-plan[8]+1);
+            boolean unfinished = configured && (cursor < total || pendingDrops != null || hasCargo());
+            if (unfinished && confirmation == null)
+                return new Activation("xf.miner.confirm_replace", plan.clone(), next.clone());
+            configure(next);
+        }
         employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
         if (!running) {
             running = true; returning = hasCargo(); status = "working"; resetPath();
             searchOffset = 0;
         }
-        return "";
+        return new Activation("");
     }
     public void onLivingUpdate() {
         super.onLivingUpdate();
@@ -201,8 +221,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (block == net.minecraft.init.Blocks.bedrock || block.getBlockHardness(worldObj, x, y, z) < 0) {
                 advance(workCursor); continue;
             }
-            if (BuilderPlacement.protectedBlock(worldObj, x, y, z)
-                    || worldObj.getTileEntity(x, y, z) != null) { stop("protected"); return; }
+            if (BuilderPlacement.protectedBlock(worldObj, x, y, z)) { stop("protected"); return; }
+            if (worldObj.getTileEntity(x, y, z) != null) { stop("container"); return; }
             if (block.getMaterial().isLiquid()) { stop("liquid"); return; }
             if (!moveNear(x, y + 1, z)) {
                 if ("unreachable".equals(status)) findAccessibleTarget(layer);
@@ -214,7 +234,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 resetMining(); blockedTicks += 10;
                 // A row-order target can be hidden behind another block in the same layer.
                 // Search that layer without skipping any remaining work.
-                if (!findAccessibleTarget(layer) && "travel".equals(status)) navigate(x, y + 1, z);
+                if (!findAccessibleTarget(layer) && "travel".equals(status) && navigate(x, y + 1, z)) status = "obstructed";
                 return;
             }
             blockedTicks = 0;
@@ -243,7 +263,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 com.hfr.worker.MinerHarvestDrops.finish(harvested);
             }
             miningProgress = 0; miningBlock = null;
-            if (!harvested) { stop("protected"); return; }
+            if (!harvested) { stop("harvest_denied"); return; }
             if (!collectDrops(x, y, z)) { pendingDrops = new int[] {x, y, z}; returning = true; }
             advance(workCursor);
             if (getHeldItem() == null) { returning = toolBroken = true; status = "tool_broken"; }
@@ -269,6 +289,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean findAccessibleTarget(int layer) {
         int width = plan[5] - plan[3] + 1, end = (cursor / layer + 1) * layer;
+        boolean unreachable = "unreachable".equals(status);
         if (searchOffset == 0) searchUnloaded = false;
         for (int scans = 0; scans < 64 && cursor + searchOffset < end; scans++, searchOffset++) {
             int candidate = cursor + searchOffset;
@@ -286,7 +307,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (cursor + searchOffset >= end) {
             searchOffset = 0;
             if (searchUnloaded) status = "chunk";
-            else if (blockedTicks >= 100 || pathTicks >= 100 || "unreachable".equals(status)) stop("unreachable");
+            else if (blockedTicks >= 100 || pathTicks >= 100 || unreachable) stop("unreachable");
             else status = "travel";
         }
         else status = "searching";

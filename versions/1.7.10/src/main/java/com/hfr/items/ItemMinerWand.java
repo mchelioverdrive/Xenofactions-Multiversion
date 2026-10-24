@@ -1,5 +1,6 @@
 package com.hfr.items;
 
+import java.util.Arrays;
 import java.util.List;
 import com.hfr.entity.EntityFactionMiner;
 import net.minecraft.entity.Entity;
@@ -21,6 +22,7 @@ public final class ItemMinerWand extends Item {
     @Override public boolean onBlockStartBreak(ItemStack stack,int x,int y,int z,EntityPlayer player) { return true; }
     public static boolean bound(ItemStack stack, EntityFactionMiner miner) {
         return stack != null && stack.getItem() instanceof ItemMinerWand && stack.hasTagCompound()
+                && stack.getTagCompound().hasKey("Miner", 8) && stack.getTagCompound().hasKey("Dimension", 3)
                 && miner.getUniqueID().toString().equals(stack.getTagCompound().getString("Miner"))
                 && miner.dimension == stack.getTagCompound().getInteger("Dimension");
     }
@@ -62,17 +64,38 @@ public final class ItemMinerWand extends Item {
         player.addChatMessage(new ChatComponentTranslation("xf.miner.wands_ready"));
         return "xf.miner.wands_ready";
     }
-    public static int[] selection(EntityPlayer player, EntityFactionMiner miner) {
-        ItemStack stack = player.inventory.getItemStack();
-        if (!bound(stack, miner) || stack.getItem() != ModItems.miner_area_wand) {
-            stack = null;
-            for (ItemStack candidate : player.inventory.mainInventory)
-                if (bound(candidate, miner) && candidate.getItem() == ModItems.miner_area_wand) { stack = candidate; break; }
+    public static final class Selection {
+        public final int[] corners;
+        public final String error;
+        private Selection(int[] corners, String error) { this.corners = corners; this.error = error; }
+    }
+    /** Never turn an incomplete, invalid or foreign selection into an implicit resume. */
+    public static Selection selection(EntityPlayer player, EntityFactionMiner miner) {
+        int[] selected = new int[0];
+        boolean foreign = false;
+        for (int slot = -1; slot < player.inventory.mainInventory.length; slot++) {
+            ItemStack stack = slot < 0 ? player.inventory.getItemStack() : player.inventory.mainInventory[slot];
+            if (stack == null || stack.getItem() != ModItems.miner_area_wand || !stack.hasTagCompound()) continue;
+            NBTTagCompound tag = stack.getTagCompound();
+            if (!miner.getUniqueID().toString().equals(tag.getString("Miner"))) {
+                if (tag.getBoolean("A") || tag.getBoolean("B")) foreign = true;
+                continue;
+            }
+            if (!tag.getBoolean("A") && !tag.getBoolean("B")) continue;
+            if (!bound(stack, miner)) return new Selection(new int[0], "xf.miner.selection_dimension");
+            if (!tag.getBoolean("A") || !tag.getBoolean("B")) return new Selection(new int[0], "xf.miner.select_area");
+            for (String prefix : new String[] {"A", "B"}) {
+                if (!tag.hasKey(prefix, 1) || !tag.hasKey(prefix+"X", 3) || !tag.hasKey(prefix+"Y", 3) || !tag.hasKey(prefix+"Z", 3)
+                        || Math.abs((long)tag.getInteger(prefix+"X")) > 30000000 || Math.abs((long)tag.getInteger(prefix+"Z")) > 30000000
+                        || tag.getInteger(prefix+"Y") < 0 || tag.getInteger(prefix+"Y") >= miner.worldObj.getHeight())
+                    return new Selection(new int[0], "xf.miner.invalid_area");
+            }
+            int[] next = corners(tag);
+            if (selected.length != 0 && !Arrays.equals(plan(selected), plan(next)))
+                return new Selection(new int[0], "xf.miner.selection_ambiguous");
+            selected = next;
         }
-        if (stack == null) return new int[0];
-        NBTTagCompound tag = stack.getTagCompound();
-        if (!tag.getBoolean("A") || !tag.getBoolean("B")) return new int[0];
-        return corners(tag);
+        return new Selection(selected, selected.length == 0 && foreign ? "xf.miner.selection_other" : "");
     }
     public static int[] corners(NBTTagCompound tag) {
         return new int[] {tag.getInteger("AX"), tag.getInteger("AY"), tag.getInteger("AZ"),

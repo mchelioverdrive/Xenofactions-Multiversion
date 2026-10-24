@@ -33,16 +33,22 @@ public final class MinerActionPacket implements IMessage {
                     || player.openContainer.windowId != message.window
                     || ((ContainerMinerNPC)player.openContainer).worker != entity) return null;
             EntityFactionMiner worker = (EntityFactionMiner)entity;
-            if (!worker.mayManage(player)) return null;
-            String feedback = "";
-            if (message.action == 1) feedback = worker.start(player);
-            else if (message.action == 2) worker.pause();
-            else if (message.action == 3) feedback = com.hfr.items.ItemMinerWand.give(player, worker, true);
-            else if (message.action == 4) {
-                int[] selected = com.hfr.items.ItemMinerWand.selection(player, worker);
-                feedback = selected.length == 7 ? worker.configure(player, com.hfr.items.ItemMinerWand.plan(selected)) : "xf.miner.select_area";
+            ContainerMinerNPC container = (ContainerMinerNPC)player.openContainer;
+            if (!worker.mayManage(player)) {
+                container.replacement = null;
+                return new MinerSnapshotPacket(worker, player, "xf.worker.denied", true);
             }
-            return new MinerSnapshotPacket(worker, player, feedback);
+            String feedback = "";
+            if (message.action == 1 || message.action == 4) {
+                EntityFactionMiner.Activation result = worker.start(player, message.action == 4 ? container.replacement : null);
+                container.replacement = result.needsConfirmation() ? result : null;
+                feedback = result.feedback;
+            } else if (message.action != 0) {
+                container.replacement = null;
+                if (message.action == 2) worker.pause();
+                else if (message.action == 3) feedback = com.hfr.items.ItemMinerWand.give(player, worker, true);
+            }
+            return new MinerSnapshotPacket(worker, player, feedback, message.action != 0);
         }
     }
 }

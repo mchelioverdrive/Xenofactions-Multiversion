@@ -14,9 +14,12 @@ public final class MinerSnapshotPacket implements IMessage {
     private String uuid = "", feedback = "";
     private NBTTagCompound state;
     public MinerSnapshotPacket() { }
-    public MinerSnapshotPacket(EntityFactionMiner worker, net.minecraft.entity.player.EntityPlayer player, String feedback) {
+    public MinerSnapshotPacket(EntityFactionMiner worker, net.minecraft.entity.player.EntityPlayer player, String feedback, boolean actionReply) {
         id = worker.getEntityId(); uuid = worker.getUniqueID().toString(); state = worker.snapshot(); this.feedback = feedback;
-        state.setIntArray("Selection", com.hfr.items.ItemMinerWand.selection(player, worker));
+        com.hfr.items.ItemMinerWand.Selection selected = com.hfr.items.ItemMinerWand.selection(player, worker);
+        state.setIntArray("Selection", selected.corners); state.setString("SelectionError", selected.error);
+        state.setBoolean("ActionReply", actionReply);
+        state.setBoolean("ConfirmReplacement", ((com.hfr.inventory.container.ContainerMinerNPC)player.openContainer).replacement != null);
         state.setInteger("Window", player.openContainer.windowId);
     }
     public void fromBytes(ByteBuf buf) {
