@@ -46,8 +46,23 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     // chest X/Y/Z, min X/Z, max X/Z, top Y, bottom Y
     private int[] plan = new int[PLAN_SIZE];
     private int cursor, pathTicks, jobDimension;
-    private boolean configured, running, returning, toolBroken;
+    private boolean configured, running, toolBroken;
+    private enum Task {
+        MINING("excavate"), TO_STORAGE("to_storage"), DEPOSITING("deposit"), RESTOCKING("restock"), TO_WORK("to_work"), DROPS("drops"), COMPLETE("complete");
+        final String key;
+        Task(String key) { this.key = key; }
+    }
+    private enum StorageReason {
+        NONE("none"), CAPACITY("capacity"), OVERFLOW("overflow"), TOOL("tool"), TORCHES("torches"), COMPLETE("complete");
+        final String key;
+        StorageReason(String key) { this.key = key; }
+    }
+    private Task task = Task.TO_WORK;
+    private StorageReason storageReason = StorageReason.NONE;
+    private final long[] taskLogs = new long[Task.values().length];
+    private long lastStopLog;
     private int[] pendingDrops;
+    private boolean pendingDropsCaptured;
     private final ItemStack[] cargo = new ItemStack[27];
     private float miningProgress;
     private Block miningBlock;
@@ -65,22 +80,25 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private long selectionRevision, lastSelectionLog, lastInstalledLog, lastNavigationLog;
     private boolean installedDown;
     private int[] destination, waypoint;
-    private int approach, navigationFailures;
-    private double lastTravelX, lastTravelY, lastTravelZ;
+    private int navigationFailures;
+    private double bestRouteProgress;
     private String navigationReason = "";
     private String navigationDetail = "";
     // A helix of original terrain remains until the final bottom-up pass. Never place free blocks.
     private boolean accessRamp;
     private int rampOffset, rampCleanup = -1;
     private final java.util.BitSet rejectedTargets = new java.util.BitSet();
+    // Storage -> work, never appended to by ordinary movement. Revalidated before reuse.
     private final java.util.List<int[]> returnRoute = new java.util.ArrayList<int[]>();
-    private final java.util.Set<Long> triedWaypoints = new java.util.HashSet<Long>();
-    private int travelSteps;
+    private final java.util.List<int[]> travelRoute = new java.util.ArrayList<int[]>();
+    private int routeIndex, segmentEnd, routeRetries;
+    private final java.util.List<ItemStack> overflowDrops = new java.util.ArrayList<ItemStack>();
+    private String capacityDetail = "";
     private int returnFailureTarget = -1, returnFailures;
 
     public EntityFactionMiner(World world) {
         super(world); setSize(.6F, 1.8F); stepHeight = 1F;
-        getNavigator().setCanSwim(true);
+        getNavigator().setCanSwim(false); getNavigator().setAvoidsWater(true);
     }
     protected void applyEntityAttributes() {
         super.applyEntityAttributes();
@@ -111,13 +129,51 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     public void pause() { stop("paused"); }
     private void stop(String reason) {
+        long now = System.nanoTime();
+        if (!"paused".equals(reason) && !"complete".equals(reason) && !"navigation_failed".equals(reason)
+                && (lastStopLog == 0 || now-lastStopLog >= 60000000000L)) {
+            lastStopLog = now; XFLog.warn(taskDiagnostic("stopped: " + reason));
+        }
         running = false; status = reason; resetPath(); clearRequests();
         if (!"navigation_failed".equals(reason)) navigationReason = navigationDetail = "";
     }
     private void resetPath() {
         getNavigator().clearPathEntity(); pathTicks = 0;
-        destination = waypoint = null; approach = navigationFailures = 0; resetMining();
-        triedWaypoints.clear(); travelSteps = 0;
+        destination = waypoint = null; navigationFailures = 0; resetMining();
+        travelRoute.clear(); routeIndex = segmentEnd = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
+    }
+    private String taskDiagnostic(String reason) {
+        return "Miner " + getUniqueID() + " task=" + task.key + " reason=" + reason + " storage=" + storageReason.key
+                + " pos=" + posX+","+posY+","+posZ + " destination=" + Arrays.toString(destination)
+                + " waypoint=" + Arrays.toString(waypoint) + " cursor=" + cursor + " target=" + targetCursor + " cleanup=" + rampCleanup;
+    }
+    private void transition(Task next, String reason, int[] goal) {
+        if (task == next && Arrays.equals(destination,goal)) return;
+        String previous = task.key;
+        resetPath(); task = next; destination = goal == null ? null : goal.clone();
+        navigationReason = navigationDetail = "";
+        status = next.key;
+        long now = System.nanoTime();
+        if (taskLogs[next.ordinal()] == 0 || now-taskLogs[next.ordinal()] >= 1000000000L) {
+            taskLogs[next.ordinal()] = now;
+            XFLog.info(taskDiagnostic(previous + " -> " + reason) + (next == Task.TO_STORAGE ? " " + cargoCapacityDetail() + " " + capacityDetail : ""));
+        }
+    }
+    private boolean storageTask() { return task == Task.TO_STORAGE || task == Task.DEPOSITING || task == Task.RESTOCKING; }
+    private int totalWork() { return (plan[5]-plan[3]+1)*(plan[6]-plan[4]+1)*(plan[7]-plan[8]+1); }
+    private boolean unfinished() { return cursor < totalWork() || rampCleanup >= 0 || pendingDrops != null || !overflowDrops.isEmpty(); }
+    private int[] workDestination() {
+        if (pendingDrops != null) return new int[] {pendingDrops[0],pendingDrops[1]+1,pendingDrops[2]};
+        int width = plan[5]-plan[3]+1, layer = width*(plan[6]-plan[4]+1);
+        int current = cursor >= totalWork() && rampCleanup >= 0 ? rampCursor(rampCleanup)
+                : targetCursor >= cursor && targetCursor/layer == cursor/layer ? targetCursor : cursor;
+        return current < totalWork() ? new int[] {plan[3]+current%width,plan[7]-current/layer+1,plan[4]+current/width%(plan[6]-plan[4]+1)} : null;
+    }
+    private void returnToWork(String reason) { transition(Task.TO_WORK,reason,workDestination()); }
+    private void beginStorage(StorageReason reason) {
+        storageReason = reason;
+        if (reason != StorageReason.OVERFLOW) capacityDetail = "";
+        transition(Task.TO_STORAGE,reason.key,new int[] {plan[0],plan[1],plan[2]});
     }
     public long nextSelectionRevision(long observed) {
         selectionRevision = Math.max(selectionRevision,observed);
@@ -164,11 +220,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         String error = configured ? validateArea(next) : "";
         if (!error.isEmpty()) return error;
         pause(); plan = next; stationAssigned = true; jobDimension = dimension; returnRoute.clear();
+        task = Task.TO_WORK; storageReason = StorageReason.NONE;
         return "xf.miner.station_set";
     }
     // Only Start can install a validated, confirmed replacement. Real overflow drops remain collectible.
     private void configure(int[] next) {
-        pause(); plan = next; cursor = 0; configured = true; returning = hasCargo();
+        pause(); plan = next; cursor = 0; configured = true; task = Task.TO_WORK; storageReason = StorageReason.NONE;
         targetCursor = -1; searchOffset = 0;
         rejectedTargets.clear(); returnRoute.clear();
         requiredHarvest = -1; needsLight = false; toolBroken = false;
@@ -227,14 +284,25 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         logSelection("installed",down,plan);
         employerId = player.getUniqueID(); employerName = player.getCommandSenderName(); actor = null;
         if (!running) {
-            running = true; returning = hasCargo(); status = "working"; resetPath();
+            running = true; status = "working"; resetPath();
             navigationReason = navigationDetail = "";
             rejectedTargets.clear(); returnFailures = 0; returnFailureTarget = -1;
             searchOffset = 0;
+            // Resume an explicit saved trip, never infer a trip from partial cargo.
+            if (storageTask()) destination = new int[] {plan[0],plan[1],plan[2]};
+            else returnToWork("start/resume");
         }
         return new Activation("");
     }
     public void onLivingUpdate() {
+        // Native following checks neighboring cells while shortcutting. Do not let those checks
+        // discover unloaded chunks even though our planned route itself only uses loaded cells.
+        if (!worldObj.isRemote && !getNavigator().noPath() && waypoint != null && !segmentChunksLoaded(waypoint)) {
+            getNavigator().clearPathEntity(); status = "chunk"; pathTicks = 0;
+        }
+        if (!worldObj.isRemote && !getNavigator().noPath() && destination != null
+                && atDestination(destination[0],destination[1],destination[2],task == Task.TO_WORK && pendingDrops == null))
+            arrived();
         super.onLivingUpdate();
         if (worldObj.isRemote || !running || ticksExisted % 10 != 0) return;
         try {
@@ -257,17 +325,31 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         stockTorchesFromCargo();
         if (suitable(getHeldItem())) requestedTools = 0;
         if (torchCount() > 0) { requestedTorches = 0; needsLight = false; }
-        int totalWork = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
-        if (returning && !hasCargo() && (cursor < totalWork || rampCleanup >= 0) && suitable(getHeldItem()) && (!needsLight || torchCount() > 0))
-            returning = false;
-        if (returning || !suitable(getHeldItem()) || cargoFull() || needsLight && torchCount() == 0) { visitChest(); return; }
+        if ((task == Task.TO_STORAGE || task == Task.RESTOCKING && !hasCargo())
+                && (storageReason == StorageReason.TOOL || storageReason == StorageReason.TORCHES
+                    || task == Task.TO_STORAGE && storageReason == StorageReason.CAPACITY)
+                && suitable(getHeldItem()) && (!needsLight || torchCount() > 0) && !cargoFull() && overflowDrops.isEmpty())
+            returnToWork("storage need resolved by inventory change");
+        if (!storageTask()) {
+            if (!unfinished()) {
+                if (hasCargo()) beginStorage(StorageReason.COMPLETE);
+                else { transition(Task.COMPLETE,"work and deposits finished",null); stop("complete"); return; }
+            } else if (!overflowDrops.isEmpty()) beginStorage(StorageReason.OVERFLOW);
+            else if (cargoFull()) beginStorage(StorageReason.CAPACITY);
+            else if ((cursor < totalWork() || rampCleanup >= 0) && !suitable(getHeldItem())) beginStorage(StorageReason.TOOL);
+            else if ((cursor < totalWork() || rampCleanup >= 0) && needsLight && torchCount() == 0) beginStorage(StorageReason.TORCHES);
+        }
+        if (storageTask()) { visitChest(); return; }
         if (pendingDrops != null) {
             int x = pendingDrops[0], y = pendingDrops[1], z = pendingDrops[2];
             if (!worldObj.blockExists(x, y, z)) { status = "chunk"; return; }
             if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) { stop("denied"); return; }
+            if (task != Task.DROPS) transition(Task.TO_WORK,"recover pending drops",new int[] {x,y+1,z});
             if (!moveNear(x, y + 1, z)) { if ("route_failed".equals(status)) terminalNavigation(); return; }
-            if (collectDrops(x, y, z)) pendingDrops = null;
-            returning = hasCargo(); return;
+            transition(Task.DROPS,"at pending drop site",new int[] {x,y+1,z});
+            if (collectDrops(x, y, z)) { pendingDrops = null; pendingDropsCaptured = false; returnToWork("pending drops recovered"); }
+            else { pendingDropsCaptured = true; beginStorage(StorageReason.OVERFLOW); }
+            return;
         }
         int width = plan[5] - plan[3] + 1, length = plan[6] - plan[4] + 1, layer = width * length;
         int total = layer * (plan[7] - plan[8] + 1);
@@ -286,6 +368,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (BuilderPlacement.protectedBlock(worldObj, x, y, z)) { stop("protected"); return; }
             if (worldObj.getTileEntity(x, y, z) != null) { stop("container"); return; }
             if (block.getMaterial().isLiquid()) { stop("liquid"); return; }
+            int[] workGoal = new int[] {x,y+1,z};
+            if (task != Task.MINING || !Arrays.equals(destination,workGoal)) transition(Task.TO_WORK,"approach unfinished target",workGoal);
             if (!moveNear(x, y + 1, z, true)) {
                 if ("route_failed".equals(status)) {
                     if (cleanup) terminalNavigation();
@@ -293,7 +377,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 }
                 return;
             }
-            status = "travel";
+            transition(Task.MINING,"at work position",workGoal);
             if (!visible(x, y, z)) {
                 if ("chunk".equals(status)) return;
                 resetMining();
@@ -318,7 +402,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             int meta = worldObj.getBlockMetadata(x, y, z);
             if (!block.canHarvestBlock(player, meta)) {
                 requiredHarvest = Math.max(0, block.getHarvestLevel(meta));
-                player.inventory.mainInventory[0] = null; returning = true; status = "tool_level"; resetMining(); return;
+                player.inventory.mainInventory[0] = null; beginStorage(StorageReason.TOOL); resetMining(); return;
             }
             requiredHarvest = -1;
             if (!lightWorkArea()) { player.inventory.mainInventory[0] = null; return; }
@@ -339,13 +423,23 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             miningProgress = 0; miningBlock = null;
             if (!harvested) { stop("harvest_denied"); return; }
             rejectedTargets.clear();
-            if (!collectDrops(x, y, z)) { pendingDrops = new int[] {x, y, z}; returning = true; }
+            boolean collected = collectDrops(x, y, z);
+            if (!collected) { pendingDrops = new int[] {x, y, z}; pendingDropsCaptured = true; }
             advance(workCursor);
-            if (getHeldItem() == null) { returning = toolBroken = true; status = "tool_broken"; }
-            if (cargoFull()) returning = true;
+            // The safety route was checked with precisely this block absent; do not append travel to it.
+            if (!collected) beginStorage(StorageReason.OVERFLOW);
+            else if (!unfinished()) {
+                if (hasCargo()) beginStorage(StorageReason.COMPLETE);
+                else { transition(Task.COMPLETE,"last block had no carried output",null); stop("complete"); }
+            }
+            else if (cargoFull()) beginStorage(StorageReason.CAPACITY);
+            else if (getHeldItem() == null) { toolBroken = true; beginStorage(StorageReason.TOOL); }
             return;
         }
-        if (cursor >= total && rampCleanup < 0) { returning = true; visitChest(); }
+        if (cursor >= total && rampCleanup < 0) {
+            if (hasCargo()) { beginStorage(StorageReason.COMPLETE); visitChest(); }
+            else { transition(Task.COMPLETE,"no work or cargo remains",null); stop("complete"); }
+        }
         else status = "scanning";
     }
     private void advance(int minedCursor) {
@@ -420,142 +514,105 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private boolean moveNear(int x, int y, int z) {
         return moveNear(x,y,z,false);
     }
+    private boolean atDestination(int x,int y,int z,boolean mining) {
+        if (!onGround || getDistanceSq(x+.5,y,z+.5) > 9 || mining && cursor >= totalWork() && posY <= y+.5) return false;
+        int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.1), pz = (int)Math.floor(posZ);
+        return standing(px,py,pz,mining ? x : -30000001,mining ? y-1 : -1,z) && (!mining || visible(x,y-1,z));
+    }
+    private void arrived() {
+        getNavigator().clearPathEntity(); travelRoute.clear(); waypoint = null;
+        pathTicks = navigationFailures = routeRetries = 0; navigationReason = navigationDetail = "";
+    }
     private boolean moveNear(int x, int y, int z, boolean mining) {
-        if (destination == null || destination[0] != x || destination[1] != y || destination[2] != z) {
-            resetPath(); destination = new int[] {x,y,z};
-            lastTravelX = posX; lastTravelY = posY; lastTravelZ = posZ;
-        }
-        boolean cleanup = mining && cursor >= (plan[5]-plan[3]+1)*(plan[6]-plan[4]+1)*(plan[7]-plan[8]+1);
-        boolean footing = (!cleanup || posY > y+.5) && (!mining || !(net.minecraft.util.MathHelper.floor_double(posX) == x
-                && net.minecraft.util.MathHelper.floor_double(boundingBox.minY)-1 == y-1
-                && net.minecraft.util.MathHelper.floor_double(posZ) == z));
-        if (onGround && footing && getDistanceSq(x+.5,y,z+.5) <= 9 && (!mining || visible(x,y-1,z))) {
-            getNavigator().clearPathEntity(); pathTicks = navigationFailures = 0; navigationReason = ""; return true;
-        }
+        status = task.key;
+        int[] goal = new int[] {x,y,z};
+        if (!Arrays.equals(destination,goal)) { resetPath(); destination = goal; }
+        if (atDestination(x,y,z,mining)) { arrived(); return true; }
+        if (task == Task.MINING || task == Task.DROPS) transition(Task.TO_WORK,"work position changed",goal);
+        else if (storageTask() && task != Task.TO_STORAGE) transition(Task.TO_STORAGE,"station interaction position changed",goal);
         resetMining();
-        double moved = (posX-lastTravelX)*(posX-lastTravelX)+(posY-lastTravelY)*(posY-lastTravelY)+(posZ-lastTravelZ)*(posZ-lastTravelZ);
-        if (moved >= .16) {
-            lastTravelX = posX; lastTravelY = posY; lastTravelZ = posZ; pathTicks = navigationFailures = 0;
-        } else pathTicks += 10;
-        // Distance to the final destination may increase on a useful detour; measure actual movement.
-        if (!getNavigator().noPath() && pathTicks < 100) { status = "travel"; return false; }
-        if (pathTicks >= 100) {
-            getNavigator().clearPathEntity(); pathTicks = 0; navigationFailures++; navigationReason = "stalled";
+        if (!onGround) {
+            getNavigator().clearPathEntity(); pathTicks += 10; status = "recovering";
+            if (pathTicks >= 100) { navigationReason = "footing"; status = "route_failed"; }
+            return false;
         }
-        if (navigationFailures >= 12) { status = "route_failed"; return false; }
-        if (travelSteps >= 128) { navigationReason = "detour_limit"; status = "route_failed"; return false; }
-        if (!pathCacheLoaded()) return false;
-        List<int[]> candidates = standingCandidates(x,y,z,mining);
-        int gx = x, gy = y, gz = z;
-        boolean routed = false;
-        if (!returnRoute.isEmpty() && getDistanceSq(x+.5,y,z+.5) > 9) {
-            int here = 0, there = 0; double near = Double.MAX_VALUE, goal = Double.MAX_VALUE;
-            for (int i = 0; i < returnRoute.size(); i++) {
-                int[] p = returnRoute.get(i);
-                double d = getDistanceSq(p[0]+.5,p[1],p[2]+.5);
-                if (d < near) { here = i; near = d; }
-                double g = (double)(p[0]-x)*(p[0]-x)+(double)(p[1]-y)*(p[1]-y)+(double)(p[2]-z)*(p[2]-z);
-                if (g < goal) { there = i; goal = g; }
+        if (waypoint != null && !segmentChunksLoaded(waypoint)) {
+            getNavigator().clearPathEntity(); status = "chunk"; pathTicks = 0; return false;
+        }
+        if (!travelRoute.isEmpty()) {
+            int previous = routeIndex;
+            for (int i = routeIndex+1; i <= segmentEnd && i < travelRoute.size(); i++) {
+                int[] next = travelRoute.get(i);
+                if (getDistanceSq(next[0]+.5,next[1],next[2]+.5) < .36) routeIndex = i;
             }
-            if (near < 4 && here != there) {
-                int[] p = returnRoute.get(here+Math.max(-6,Math.min(6,there-here)));
-                if (standing(p[0],p[1],p[2],-30000001,-1,0)) {
-                    gx = p[0]; gy = p[1]; gz = p[2]; routed = true;
-                    candidates.clear(); candidates.add(new int[] {gx,gy,gz});
+            int[] next = travelRoute.get(Math.min(routeIndex+1,travelRoute.size()-1));
+            double progress = routeIndex-Math.min(1,Math.sqrt(getDistanceSq(next[0]+.5,next[1],next[2]+.5)));
+            if (progress > bestRouteProgress+.1) { bestRouteProgress = progress; pathTicks = 0; }
+            else pathTicks += 10;
+            if (routeIndex > previous) navigationFailures = 0;
+            boolean intact = routeIntact(travelRoute,routeIndex,Math.min(travelRoute.size()-1,routeIndex+8),
+                    mining ? x : -30000001,mining ? y-1 : -1,z);
+            if (!intact || getDistanceSq(next[0]+.5,next[1],next[2]+.5) > 16 || pathTicks >= 100) {
+                navigationReason = intact ? "stalled" : "path";
+                navigationDetail = "Route stopped at step " + routeIndex + "/" + (travelRoute.size()-1)
+                        + "; next=" + Arrays.toString(next) + (intact ? "; no forward route progress" : "; footing/headroom changed");
+                getNavigator().clearPathEntity(); travelRoute.clear(); routeRetries++; pathTicks = 0;
+            } else if (!getNavigator().noPath()) { status = task.key; return false; }
+            else if (routeIndex+1 >= travelRoute.size()) {
+                // A valid path endpoint is still not arrival unless the interaction check above succeeds.
+                navigationReason = "standing"; navigationDetail = "Route endpoint no longer permits interaction";
+                travelRoute.clear(); routeRetries++;
+            }
+        }
+        if (routeRetries >= 4 || navigationFailures >= 3) { status = "route_failed"; return false; }
+        if (travelRoute.isEmpty()) {
+            List<int[]> goals = standingCandidates(x,y,z,mining);
+            if (goals.isEmpty()) { navigationReason = "standing"; navigationDetail = standingObstruction(x,y,z); }
+            else {
+                // Search complete routes first, including direct approaches; a verified cached
+                // route remains a safe fallback when the bounded search cannot rediscover it.
+                List<int[]> route = searchRoute(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
+                if (route == null) route = cachedTravel(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
+                if (route != null && !route.isEmpty()) {
+                    travelRoute.addAll(route); routeIndex = segmentEnd = 0;
+                    bestRouteProgress = -Double.MAX_VALUE; pathTicks = 0;
                 }
             }
-        }
-        if (!routed && accessRamp && Math.abs(y-posY) > 2) {
-            int currentDepth = Math.max(0,Math.min(plan[7]-plan[8],plan[7]+1-(int)Math.floor(posY)));
-            int desiredDepth = Math.max(0,Math.min(plan[7]-plan[8],plan[7]+1-y));
-            boolean atRamp = posX >= plan[3]-2 && posX <= plan[5]+3 && posZ >= plan[4]-2 && posZ <= plan[6]+3;
-            int depth = atRamp ? currentDepth+Math.max(-4,Math.min(4,desiredDepth-currentDepth)) : 0;
-            int[] r = rampColumn(rampOffset+depth);
-            if (standing(r[0],plan[7]-depth+1,r[1],-30000001,-1,0)) {
-                gx = r[0]; gy = plan[7]-depth+1; gz = r[1];
-                candidates.clear(); candidates.add(new int[] {gx,gy,gz});
+            if (travelRoute.isEmpty()) {
+                if (!"chunk".equals(status)) { navigationFailures++; status = navigationFailures >= 3 ? "route_failed" : "recovering"; }
+                return false;
             }
         }
-        double distance = Math.sqrt(getDistanceSq(gx+.5,gy,gz+.5));
-        double step = Math.min(8,Math.max(2,getNavigator().getPathSearchRange()*.45));
-        boolean distant = distance > step;
-        if (distant) {
-            candidates.clear();
-            double angle = Math.atan2(gz+.5-posZ,gx+.5-posX);
-            // Bounded alternatives include sideways/backward approaches around local obstructions.
-            for (int turn = 0; turn < 8; turn++) {
-                double a = angle+(turn == 0 ? 0 : (turn%2 == 1 ? 1 : -1)*((turn+1)/2)*Math.PI/4);
-                int wx = net.minecraft.util.MathHelper.floor_double(posX+Math.cos(a)*step);
-                int wz = net.minecraft.util.MathHelper.floor_double(posZ+Math.sin(a)*step);
-                int base = net.minecraft.util.MathHelper.floor_double(posY);
-                for (int dy = 2; dy >= -3; dy--) if (standing(wx,base+dy,wz,-30000001,-1,0))
-                    candidates.add(new int[] {wx,base+dy,wz});
-            }
+        // Route candidates are ranked by complete safe route cost, not an angular rotation.
+        // Give vanilla only a straight, verified run (at most six edges). Its shortcutting cannot
+        // cut a corner across water/a pit or bypass a height change on these segments.
+        segmentEnd = Math.min(routeIndex+1,travelRoute.size()-1);
+        int[] from = travelRoute.get(routeIndex), first = travelRoute.get(segmentEnd);
+        int dx = first[0]-from[0], dz = first[2]-from[2];
+        if (segmentEnd > routeIndex && first[1] == from[1]) while (segmentEnd+1 < travelRoute.size() && segmentEnd-routeIndex < 6) {
+            int[] a = travelRoute.get(segmentEnd), b = travelRoute.get(segmentEnd+1);
+            if (b[1] != a[1] || b[0]-a[0] != dx || b[2]-a[2] != dz) break;
+            segmentEnd++;
         }
-        if (candidates.isEmpty()) {
-            navigationReason = "standing";
-            navigationDetail = standingObstruction(gx,gy,gz);
+        PathPoint[] points = new PathPoint[segmentEnd-routeIndex+1];
+        for (int i = 0; i < points.length; i++) {
+            int[] node = travelRoute.get(routeIndex+i); points[i] = new PathPoint(node[0],node[1],node[2]);
         }
-        else {
-            // At most four native searches per work tick. Rotate instead of repeating one failed approach.
-            for (int tries = 0; tries < Math.min(4,candidates.size()); tries++) {
-                int[] c = candidates.get((approach++)%candidates.size());
-                long key = positionKey(c[0],c[1],c[2]);
-                if (distant && triedWaypoints.contains(key)) continue;
-                waypoint = c;
-                PathEntity path = getNavigator().getPathToXYZ(c[0]+.5,c[1],c[2]+.5);
-                if (path == null) { navigationDetail = "No native path to " + Arrays.toString(c); continue; }
-                PathPoint end = path.getFinalPathPoint();
-                if (end == null) continue;
-                if (end.xCoord != c[0] || end.yCoord != c[1] || end.zCoord != c[2]) {
-                    navigationDetail = "Partial path ended at " + end.xCoord+","+end.yCoord+","+end.zCoord + " before " + Arrays.toString(c); continue;
-                }
-                if (!reversible(path)) { navigationDetail = "Path has unsupported footing or a drop that cannot be climbed back"; continue; }
-                if (!getNavigator().setPath(path,1)) continue;
-                if (distant) { triedWaypoints.add(key); travelSteps++; }
-                if (!returnRoute.isEmpty()) {
-                    int here = -1;
-                    for (int i = 0; i < returnRoute.size(); i++) {
-                        int[] p = returnRoute.get(i);
-                        if (p[0] == (int)Math.floor(posX) && p[1] == (int)Math.floor(boundingBox.minY+.1) && p[2] == (int)Math.floor(posZ)) { here = i; break; }
-                    }
-                    if (here < 0 || here+path.getCurrentPathLength() > 4096) returnRoute.clear();
-                    else {
-                        while (returnRoute.size() > here+1) returnRoute.remove(returnRoute.size()-1);
-                        for (int i = 0; i < path.getCurrentPathLength(); i++) {
-                            PathPoint p = path.getPathPointFromIndex(i);
-                            int[] last = returnRoute.get(returnRoute.size()-1);
-                            if (last[0] != p.xCoord || last[1] != p.yCoord || last[2] != p.zCoord)
-                                returnRoute.add(new int[] {p.xCoord,p.yCoord,p.zCoord});
-                        }
-                    }
-                }
-                status = "travel"; navigationReason = ""; return false;
-            }
-            navigationReason = "path";
+        waypoint = travelRoute.get(segmentEnd).clone();
+        if (!segmentChunksLoaded(waypoint)) { status = "chunk"; pathTicks = 0; return false; }
+        // setPath compares only coordinates with the previous path, retaining its finished index.
+        getNavigator().clearPathEntity();
+        if (!getNavigator().setPath(new PathEntity(points),1)) {
+            navigationReason = "path"; navigationDetail = "Navigator rejected verified route segment";
+            travelRoute.clear(); navigationFailures++; status = "recovering"; return false;
         }
-        navigationFailures++; status = navigationFailures >= 12 ? "route_failed" : "recovering";
-        return false;
+        status = task.key; navigationReason = navigationDetail = ""; return false;
     }
-    private boolean pathCacheLoaded() {
-        // Vanilla constructs a ChunkCache around the worker and otherwise loads every missing chunk in it.
-        int radius = (int)(getNavigator().getPathSearchRange()+8F);
-        if (radius < 8 || radius > 72) { navigationReason = "range"; status = "route_failed"; return false; }
-        int px = net.minecraft.util.MathHelper.floor_double(posX), pz = net.minecraft.util.MathHelper.floor_double(posZ);
-        for (int cx = (px-radius)>>4; cx <= (px+radius)>>4; cx++)
-            for (int cz = (pz-radius)>>4; cz <= (pz+radius)>>4; cz++)
-                if (!worldObj.blockExists(cx<<4,Math.max(0,Math.min(worldObj.getHeight()-1,(int)posY)),cz<<4)) {
-                    getNavigator().clearPathEntity(); pathTicks = 0; status = "chunk"; return false;
-                }
-        return true;
-    }
-    private boolean reversible(PathEntity path) {
-        if (path == null || path.getCurrentPathLength() < 2) return false;
-        for (int i = 0; i < path.getCurrentPathLength(); i++) {
-            PathPoint p = path.getPathPointFromIndex(i);
-            if (!standing(p.xCoord,p.yCoord,p.zCoord,-30000001,-1,0)) return false;
-            if (i > 0 && Math.abs(p.yCoord-path.getPathPointFromIndex(i-1).yCoord) > 1) return false;
-        }
+    private boolean segmentChunksLoaded(int[] end) {
+        int px = (int)Math.floor(posX), pz = (int)Math.floor(posZ);
+        for (int cx = (Math.min(px,end[0])-2)>>4; cx <= (Math.max(px,end[0])+2)>>4; cx++)
+            for (int cz = (Math.min(pz,end[2])-2)>>4; cz <= (Math.max(pz,end[2])+2)>>4; cz++)
+                if (!worldObj.blockExists(cx<<4,Math.max(0,Math.min(worldObj.getHeight()-1,(int)posY)),cz<<4)) return false;
         return true;
     }
     private List<int[]> standingCandidates(int x,int y,int z,boolean mining) {
@@ -593,66 +650,138 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private static long positionKey(int x,int y,int z) {
         return ((long)x & 0x3ffffffL)<<38 | ((long)z & 0x3ffffffL)<<12 | y & 0xfffL;
     }
-    /** Verify a reversible route with the proposed block absent, without mutating the world.
-     * Reuse its floor/headroom until excavation or external changes invalidate it. */
-    private boolean ensureReturnRoute(int removedX,int removedY,int removedZ) {
-        boolean intact = !returnRoute.isEmpty();
-        boolean connected = false;
-        for (int[] p : returnRoute) if (p[0] == (int)Math.floor(posX) && p[1] == (int)Math.floor(boundingBox.minY+.1)
-                && p[2] == (int)Math.floor(posZ)) { connected = true; break; }
-        if (!connected) intact = false;
-        for (int[] p : returnRoute) if (!standing(p[0],p[1],p[2],removedX,removedY,removedZ)) { intact = false; break; }
-        for (int i = 1; intact && i < returnRoute.size(); i++) {
-            int[] a = returnRoute.get(i-1), b = returnRoute.get(i);
-            if (Math.abs(a[0]-b[0])+Math.abs(a[2]-b[2]) != 1 || Math.abs(a[1]-b[1]) > 1) { intact = false; break; }
-            if (a[1] != b[1]) {
-                int[] low = a[1] < b[1] ? a : b;
-                if (!worldObj.blockExists(low[0],low[1]+2,low[2])
-                        || !worldObj.getBlock(low[0],low[1]+2,low[2]).getBlocksMovement(worldObj,low[0],low[1]+2,low[2])) intact = false;
-            }
+    private boolean inCorridor(int x,int z) {
+        if (x >= plan[3]-8 && x <= plan[5]+8 && z >= plan[4]-8 && z <= plan[6]+8) return true;
+        int wx = Math.max(plan[3],Math.min(plan[5],plan[0])), wz = Math.max(plan[4],Math.min(plan[6],plan[2]));
+        return corridorLeg(x,z,wx,wz) || pendingDrops != null && corridorLeg(x,z,pendingDrops[0],pendingDrops[2]);
+    }
+    private boolean corridorLeg(int x,int z,int wx,int wz) {
+        double dx = wx-plan[0], dz = wz-plan[2], length = dx*dx+dz*dz;
+        double t = length == 0 ? 0 : Math.max(0,Math.min(1,((x-plan[0])*dx+(z-plan[2])*dz)/length));
+        double ox = x-plan[0]-t*dx, oz = z-plan[2]-t*dz;
+        return ox*ox+oz*oz <= 256;
+    }
+    private boolean safeEdge(int[] a,int[] b) {
+        if (Math.abs(a[0]-b[0])+Math.abs(a[2]-b[2]) != 1 || Math.abs(a[1]-b[1]) > 1) return false;
+        if (a[1] == b[1]) return true;
+        int[] low = a[1] < b[1] ? a : b;
+        return worldObj.blockExists(low[0],low[1]+2,low[2])
+                && !worldObj.getBlock(low[0],low[1]+2,low[2]).getMaterial().isLiquid()
+                && worldObj.getBlock(low[0],low[1]+2,low[2]).getBlocksMovement(worldObj,low[0],low[1]+2,low[2]);
+    }
+    private boolean routeIntact(List<int[]> route,int from,int to,int removedX,int removedY,int removedZ) {
+        for (int i = from; i <= to; i++) {
+            int[] p = route.get(i);
+            if (!inCorridor(p[0],p[2]) || !standing(p[0],p[1],p[2],removedX,removedY,removedZ)
+                    || i > from && !safeEdge(route.get(i-1),p)) return false;
         }
-        if (intact) return true;
-        returnRoute.clear();
-        final int sx = net.minecraft.util.MathHelper.floor_double(posX), sy = net.minecraft.util.MathHelper.floor_double(boundingBox.minY+.1), sz = net.minecraft.util.MathHelper.floor_double(posZ);
-        if (!standing(sx,sy,sz,removedX,removedY,removedZ)) { navigationReason = "footing"; return false; }
+        return true;
+    }
+    private int routePosition(List<int[]> route) {
+        int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.1), pz = (int)Math.floor(posZ);
+        for (int i = 0; i < route.size(); i++) {
+            int[] p = route.get(i); if (p[0] == px && p[1] == py && p[2] == pz) return i;
+        }
+        return -1;
+    }
+    private boolean stationEndpoint(int[] p) {
+        return (double)(p[0]-plan[0])*(p[0]-plan[0])+(double)(p[1]-plan[1])*(p[1]-plan[1])
+                +(double)(p[2]-plan[2])*(p[2]-plan[2]) <= 9;
+    }
+    private List<int[]> cachedTravel(List<int[]> goals,int removedX,int removedY,int removedZ) {
+        if (returnRoute.isEmpty() || !stationEndpoint(returnRoute.get(0))) { returnRoute.clear(); return null; }
+        int here = routePosition(returnRoute), there = -1, cost = Integer.MAX_VALUE;
+        if (here < 0) return null;
+        for (int i = 0; i < returnRoute.size(); i++) for (int[] goal : goals) {
+            if (Arrays.equals(returnRoute.get(i),goal) && Math.abs(i-here) < cost) { there = i; cost = Math.abs(i-here); }
+        }
+        if (there < 0) return null;
+        if (!routeIntact(returnRoute,Math.min(here,there),Math.max(here,there),removedX,removedY,removedZ)) {
+            returnRoute.clear(); return null;
+        }
+        List<int[]> result = new java.util.ArrayList<int[]>();
+        int step = there >= here ? 1 : -1;
+        for (int i = here;; i += step) { result.add(returnRoute.get(i).clone()); if (i == there) break; }
+        return result;
+    }
+    private static int routeHeuristic(int x,int y,int z,List<int[]> goals) {
+        int best = Integer.MAX_VALUE;
+        for (int[] goal : goals) best = Math.min(best,10*(Math.abs(x-goal[0])+Math.abs(z-goal[2]))+4*Math.abs(y-goal[1]));
+        return best;
+    }
+    /** Bounded A*: rank every interaction endpoint by actual route cost plus admissible progress.
+     * Cardinal edges may climb/descend one block and must be safe in both directions. */
+    private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ) {
+        int sx = (int)Math.floor(posX), sy = (int)Math.floor(boundingBox.minY+.1), sz = (int)Math.floor(posZ);
+        if (!inCorridor(sx,sz) || !standing(sx,sy,sz,removedX,removedY,removedZ)) {
+            navigationReason = "footing"; navigationDetail = "Start outside safe corridor or unsupported: " + sx+","+sy+","+sz; return null;
+        }
+        java.util.Set<Long> endpoints = new java.util.HashSet<Long>();
+        for (int[] goal : goals) if (inCorridor(goal[0],goal[2])) endpoints.add(positionKey(goal[0],goal[1],goal[2]));
+        if (endpoints.isEmpty()) { navigationReason = "standing"; navigationDetail = "No valid endpoint inside the station/work corridor"; return null; }
         java.util.Map<Long,int[]> visited = new java.util.HashMap<Long,int[]>();
         java.util.Map<Long,Long> parents = new java.util.HashMap<Long,Long>();
-        java.util.PriorityQueue<int[]> open = new java.util.PriorityQueue<int[]>(64,(a,b) -> Integer.compare(a[3],b[3]));
+        java.util.PriorityQueue<int[]> open = new java.util.PriorityQueue<int[]>(64,(a,b) -> {
+            int order = Integer.compare(a[4],b[4]); return order != 0 ? order : Integer.compare(b[3],a[3]);
+        });
         long start = positionKey(sx,sy,sz);
-        visited.put(start,new int[] {sx,sy,sz,0}); open.add(new int[] {sx,sy,sz,0});
-        int expanded = 0;
-        boolean unloaded = false;
-        while (!open.isEmpty() && expanded++ < 8192) {
+        int[] first = new int[] {sx,sy,sz,0,routeHeuristic(sx,sy,sz,goals)};
+        visited.put(start,first); open.add(first);
+        int expanded = 0; boolean unloaded = false;
+        while (!open.isEmpty() && expanded < 8192 && visited.size() < 16384) {
             int[] p = open.poll(); long key = positionKey(p[0],p[1],p[2]);
-            double dx = p[0]-plan[0], dy = p[1]-plan[1], dz = p[2]-plan[2];
-            if (dx*dx+dy*dy+dz*dz <= 9) {
+            if (visited.get(key) != p) continue;
+            expanded++;
+            if (endpoints.contains(key)) {
+                List<int[]> result = new java.util.ArrayList<int[]>();
                 while (true) {
-                    int[] node = visited.get(key); returnRoute.add(new int[] {node[0],node[1],node[2]});
+                    int[] node = visited.get(key); result.add(new int[] {node[0],node[1],node[2]});
                     if (key == start) break;
+                    if (result.size() >= 4096) { navigationReason = "detour_limit"; navigationDetail = "Route exceeds 4096 positions"; return null; }
                     key = parents.get(key);
                 }
-                navigationReason = ""; return true;
+                java.util.Collections.reverse(result); return result;
             }
-            int cost = visited.get(key)[3]+1;
             for (int direction = 0; direction < 4; direction++) for (int stepY = -1; stepY <= 1; stepY++) {
                 int nx = p[0]+(direction == 0 ? 1 : direction == 1 ? -1 : 0);
                 int nz = p[2]+(direction == 2 ? 1 : direction == 3 ? -1 : 0), ny = p[1]+stepY;
-                long next = positionKey(nx,ny,nz);
-                if (visited.containsKey(next) || nx < Math.min(plan[0],plan[3])-16 || nx > Math.max(plan[0],plan[5])+16
-                        || nz < Math.min(plan[2],plan[4])-16 || nz > Math.max(plan[2],plan[6])+16) continue;
-                if (ny > 0 && ny+1 < worldObj.getHeight() && !worldObj.blockExists(nx,ny,nz)) { unloaded = true; continue; }
-                if (!standing(nx,ny,nz,removedX,removedY,removedZ)) continue;
-                // An upward step also needs headroom above the lower cell (in either direction).
-                int hx = stepY > 0 ? p[0] : nx, hz = stepY > 0 ? p[2] : nz, hy = Math.max(ny,p[1])+1;
-                if (stepY != 0 && (!worldObj.blockExists(hx,hy,hz) || !worldObj.getBlock(hx,hy,hz).getBlocksMovement(worldObj,hx,hy,hz))) continue;
-                visited.put(next,new int[] {nx,ny,nz,cost}); parents.put(next,key);
-                int heuristic = Math.abs(nx-plan[0])+Math.abs(ny-plan[1])+Math.abs(nz-plan[2]);
-                open.add(new int[] {nx,ny,nz,cost+heuristic});
+                if (!inCorridor(nx,nz) || ny < 1 || ny+1 >= worldObj.getHeight()) continue;
+                if (!worldObj.blockExists(nx,ny,nz)) { unloaded = true; continue; }
+                long next = positionKey(nx,ny,nz); int cost = p[3]+10+4*Math.abs(stepY);
+                int[] old = visited.get(next);
+                if (old != null && old[3] <= cost || !standing(nx,ny,nz,removedX,removedY,removedZ)) continue;
+                int[] node = new int[] {nx,ny,nz,cost,cost+routeHeuristic(nx,ny,nz,goals)};
+                if (!safeEdge(p,node)) continue;
+                if (old == null && visited.size() >= 16384) continue;
+                visited.put(next,node); parents.put(next,key); open.add(node);
             }
         }
-        navigationReason = open.isEmpty() ? "return_blocked" : "return_limit";
-        if (unloaded && open.isEmpty()) { status = "chunk"; navigationReason = ""; return false; }
-        navigationDetail = "No verified storage route with block " + removedX+","+removedY+","+removedZ + " removed; expanded=" + Math.min(expanded,8192);
+        navigationReason = open.isEmpty() ? "path" : "search_limit";
+        navigationDetail = "No complete safe route; expanded=" + expanded + " discovered=" + visited.size()
+                + " endpoints=" + endpoints.size() + "; bounded station/work corridor";
+        if (unloaded && open.isEmpty()) { status = "chunk"; navigationReason = ""; }
+        return null;
+    }
+    /** Canonical cache order is storage -> current work position. Check only the prefix needed
+     * to leave now; discard stale suffixes rather than joining old trips in opposite directions. */
+    private boolean ensureReturnRoute(int removedX,int removedY,int removedZ) {
+        int here = routePosition(returnRoute);
+        if (here >= 0 && stationEndpoint(returnRoute.get(0))
+                && routeIntact(returnRoute,0,here,removedX,removedY,removedZ)) {
+            while (returnRoute.size() > here+1) returnRoute.remove(returnRoute.size()-1);
+            return true;
+        }
+        returnRoute.clear();
+        status = task.key;
+        List<int[]> goals = standingCandidates(plan[0],plan[1],plan[2],false);
+        List<int[]> route = goals.isEmpty() ? null : searchRoute(goals,removedX,removedY,removedZ);
+        if (route != null) {
+            java.util.Collections.reverse(route); returnRoute.addAll(route); navigationReason = navigationDetail = ""; return true;
+        }
+        if (!"chunk".equals(status)) {
+            navigationReason = "search_limit".equals(navigationReason) ? "return_limit" : "return_blocked";
+            navigationDetail = "Cannot leave after harvesting " + removedX+","+removedY+","+removedZ + ": " + navigationDetail;
+        }
         return false;
     }
     private String standingObstruction(int x,int y,int z) {
@@ -674,7 +803,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (lastNavigationLog == 0 || now-lastNavigationLog >= 60000000000L) {
             lastNavigationLog = now;
             XFLog.warn("Miner " + getUniqueID() + " navigation=" + reason + " pos=" + posX+","+posY+","+posZ
-                    + " task=" + (returning ? "storage" : pendingDrops != null ? "drops" : "excavate")
+                    + " task=" + task.key + " storageReason=" + storageReason.key
                     + " cursor=" + cursor + " target=" + targetCursor + " cleanup=" + rampCleanup
                     + " destination=" + Arrays.toString(dest) + " waypoint=" + Arrays.toString(step)
                     + " range=" + getNavigator().getPathSearchRange() + " bounds=" + Arrays.toString(plan) + " detail=" + navigationDetail);
@@ -686,16 +815,28 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         IInventory chest = stationInventory(plan[0], plan[1], plan[2]);
         if (chest == null) { status = stationUnavailable(plan[0], plan[1], plan[2]); return; }
         if (!moveNear(plan[0], plan[1], plan[2])) { if ("route_failed".equals(status)) terminalNavigation(); return; }
+        if (task != Task.RESTOCKING || hasCargo() || !overflowDrops.isEmpty())
+            transition(Task.DEPOSITING,"at storage: " + storageReason.key,new int[] {plan[0],plan[1],plan[2]});
         equipCarriedTool();
         stockTorchesFromCargo();
         for (ItemStack stack : cargo) if (stack != null) insert(chest, stack);
         for (int i = 0; i < cargo.length; i++) if (cargo[i] != null && cargo[i].stackSize <= 0) cargo[i] = null;
+        for (java.util.Iterator<ItemStack> items = overflowDrops.iterator(); items.hasNext();) {
+            ItemStack stack = items.next(); insert(chest,stack); if (stack.stackSize <= 0) items.remove();
+        }
         chest.markDirty();
-        if (hasCargo()) { status = "storage_full"; return; }
+        if (hasCargo() || !overflowDrops.isEmpty()) { status = "storage_full"; supplyCheckTicks = 40; return; }
+        // New overflow was entirely captured from actual entities. Once it is deposited there
+        // is nothing left at that site; legacy coordinate-only saves still need a collection visit.
+        if (pendingDropsCaptured) { pendingDrops = null; pendingDropsCaptured = false; }
         toolBroken = false;
         int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
-        if (cursor >= total && rampCleanup < 0 && pendingDrops == null) { stop("complete"); return; }
-        if (!suitable(getHeldItem())) {
+        if (cursor >= total && rampCleanup < 0 && pendingDrops == null) {
+            transition(Task.COMPLETE,"final deposit finished",null); stop("complete"); return;
+        }
+        transition(Task.RESTOCKING,"deposit finished; check required supplies",new int[] {plan[0],plan[1],plan[2]});
+        boolean miningRemains = cursor < total || rampCleanup >= 0;
+        if (miningRemains && !suitable(getHeldItem())) {
             if (getHeldItem() != null) {
                 ItemStack old = getHeldItem(); insert(chest, old);
                 if (old.stackSize > 0) { status = "storage_full"; return; }
@@ -720,11 +861,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (taken != null) { if (torches == null) torches = taken; else torches.stackSize += taken.stackSize; }
             chest.markDirty();
         }
-        if (needsLight && torchCount() == 0) {
+        if (miningRemains && needsLight && torchCount() == 0) {
             requestedTorches = 1; status = "no_torches"; supplyCheckTicks = 40; return;
         }
         requestedTorches = 0;
-        returning = false; status = "working"; resetPath();
+        returnToWork("deposit and required restocking finished");
     }
     public static boolean pickaxe(ItemStack stack) {
         return stack != null && stack.stackSize > 0 && (stack.getItem() instanceof ItemPickaxe
@@ -817,7 +958,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         needsLight = worldObj.getBlockLightValue(px, py, pz) < 8;
         if (!needsLight) return true;
         stockTorchesFromCargo();
-        if (torchCount() == 0) { status = "no_torches"; returning = true; return false; }
+        if (torchCount() == 0) { beginStorage(StorageReason.TORCHES); return false; }
         // A small local search; mining skips torches so a placed light is not immediately harvested.
         for (int dy = 0; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
             int x = px + dx, y = py + dy, z = pz + dz;
@@ -875,20 +1016,48 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (stored == null) { stored = moving.copy(); stored.stackSize = amount; cargo[i] = stored; } else stored.stackSize += amount;
                 moving.stackSize -= amount;
             }
-            if (moving.stackSize <= 0) entity.setDead(); else { entity.setEntityItemStack(moving); all = false; }
+            if (moving.stackSize > 0) {
+                // Keep the actual harvest remainder, not another drop roll or a despawning world item.
+                capacityDetail = "output=" + net.minecraft.item.Item.itemRegistry.getNameForObject(moving.getItem())
+                        + ":" + moving.getItemDamage() + " remaining=" + moving.stackSize + " compatibleCapacity=" + remainingCapacity(moving);
+                overflowDrops.add(moving.copy()); all = false;
+            }
+            entity.setDead();
         }
         return all;
     }
     private boolean hasCargo() { for (ItemStack stack : cargo) if (stack != null && stack.stackSize > 0) return true; return false; }
-    private boolean cargoFull() { for (ItemStack stack : cargo) if (stack == null) return false; return true; }
+    private boolean cargoFull() {
+        for (ItemStack stack : cargo) if (stack == null || stack.stackSize < Math.min(getInventoryStackLimit(),stack.getMaxStackSize())) return false;
+        return true;
+    }
+    private int remainingCapacity(ItemStack output) {
+        int capacity = 0, limit = Math.min(getInventoryStackLimit(),output.getMaxStackSize());
+        for (ItemStack stack : cargo) {
+            if (stack == null) capacity += limit;
+            else if (stack.isItemEqual(output) && ItemStack.areItemStackTagsEqual(stack,output)) capacity += Math.max(0,limit-stack.stackSize);
+        }
+        return capacity;
+    }
+    private String cargoCapacityDetail() {
+        int occupied = 0, partialCapacity = 0;
+        for (ItemStack stack : cargo) if (stack != null) {
+            occupied++; partialCapacity += Math.max(0,Math.min(getInventoryStackLimit(),stack.getMaxStackSize())-stack.stackSize);
+        }
+        return "occupied=" + occupied + "/" + cargo.length + " partialStackCapacity=" + partialCapacity;
+    }
     private void updateRequests() {
         requestedTools = requestedTorches = 0;
         if (worldObj.isRemote || !configured || !authorized() || jobDimension != dimension) return;
         int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
-        if (cursor >= total && rampCleanup < 0 && pendingDrops == null) return;
+        if (cursor >= total && rampCleanup < 0) return;
         boolean tool = suitable(getHeldItem());
         int lights = torchCount();
         for (ItemStack stack : cargo) {
+            if (!tool && suitable(stack)) tool = true;
+            if (isTorch(stack)) lights += stack.stackSize;
+        }
+        for (ItemStack stack : overflowDrops) {
             if (!tool && suitable(stack)) tool = true;
             if (isTorch(stack)) lights += stack.stackSize;
         }
@@ -940,7 +1109,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setInteger("TorchesRequested", requestedTorches);
         tag.setInteger("TorchRestock", Math.max(0, 32 - torchCount()));
         tag.setInteger("WorkCursor", targetCursor);
-        tag.setString("Task", !configured ? "unassigned" : returning ? "storage" : pendingDrops != null ? "drops" : "excavate");
+        tag.setInteger("TaskVersion",1);
+        tag.setString("Task", !configured ? "unassigned" : task.key);
+        tag.setString("StorageReason",storageReason.key);
+        int overflow = 0; for (ItemStack stack : overflowDrops) overflow += stack.stackSize;
+        tag.setInteger("Overflow",overflow);
         int width = plan[5] - plan[3] + 1, length = plan[6] - plan[4] + 1;
         int current = cursor >= width*length*(plan[7]-plan[8]+1) && rampCleanup >= 0 ? rampCursor(rampCleanup) : targetCursor >= cursor ? targetCursor : cursor;
         if (configured && width > 0 && length > 0 && current < width * length * (plan[7] - plan[8] + 1))
@@ -954,13 +1127,17 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         super.writeEntityToNBT(tag);
         if (factionId != null) tag.setString("FactionUUID", factionId.toString());
         if (employerId != null) tag.setString("EmployerUUID", employerId.toString());
-        tag.setString("EmployerName", employerName); tag.setTag("MiningJob", snapshot()); tag.setBoolean("Returning", returning); tag.setBoolean("ToolBroken", toolBroken);
-        if (pendingDrops != null) tag.setIntArray("PendingDrops", pendingDrops);
+        tag.setString("EmployerName", employerName); tag.setTag("MiningJob", snapshot()); tag.setBoolean("ToolBroken", toolBroken);
+        if (pendingDrops != null) { tag.setIntArray("PendingDrops", pendingDrops); tag.setBoolean("PendingDropsCaptured",pendingDropsCaptured); }
         NBTTagList list = new NBTTagList();
         for (int i = 0; i < cargo.length; i++) if (cargo[i] != null) { NBTTagCompound entry = cargo[i].writeToNBT(new NBTTagCompound()); entry.setByte("Slot", (byte)i); list.appendTag(entry); }
         tag.setTag("Cargo", list);
+        NBTTagList overflow = new NBTTagList();
+        for (ItemStack stack : overflowDrops) overflow.appendTag(stack.writeToNBT(new NBTTagCompound()));
+        tag.setTag("OverflowDrops",overflow);
         if (torches != null) tag.setTag("Torches", torches.writeToNBT(new NBTTagCompound()));
         tag.setInteger("RequiredHarvest", requiredHarvest);
+        tag.setBoolean("NeedsLight",needsLight);
         tag.setLong("SelectionRevision",selectionRevision);
     }
     public void readEntityFromNBT(NBTTagCompound tag) {
@@ -980,19 +1157,36 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         returnRoute.clear(); rejectedTargets.clear(); resetPath(); navigationReason = "";
         torches = tag.hasKey("Torches") ? ItemStack.loadItemStackFromNBT(tag.getCompoundTag("Torches")) : null;
         requiredHarvest = tag.hasKey("RequiredHarvest") ? tag.getInteger("RequiredHarvest") : -1;
-        cursor = Math.max(0, job.getInteger("Cursor")); running = false; status = "paused"; returning = tag.getBoolean("Returning"); toolBroken = tag.getBoolean("ToolBroken");
+        cursor = Math.max(0, job.getInteger("Cursor")); running = false; status = "paused"; toolBroken = tag.getBoolean("ToolBroken");
+        task = Task.TO_WORK; storageReason = StorageReason.NONE;
+        if (job.getInteger("TaskVersion") == 1) {
+            for (Task value : Task.values()) if (value.key.equals(job.getString("Task"))) task = value;
+            for (StorageReason value : StorageReason.values()) if (value.key.equals(job.getString("StorageReason"))) storageReason = value;
+            if (storageTask() && storageReason == StorageReason.NONE) task = Task.TO_WORK;
+        }
+        needsLight = tag.hasKey("NeedsLight") ? tag.getBoolean("NeedsLight") : storageReason == StorageReason.TORCHES;
+        // Legacy Returning encoded both partial cargo and supply trips. Reevaluate actual needs
+        // on Start rather than translating that ambiguous boolean into a mandatory deposit.
         int layer = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1);
         targetCursor = job.hasKey("WorkCursor") ? job.getInteger("WorkCursor") : -1;
         if (layer <= 0 || targetCursor < cursor || targetCursor / layer != cursor / layer) targetCursor = -1;
         int[] site = tag.getIntArray("PendingDrops"); pendingDrops = site.length == 3 ? site : null;
+        pendingDropsCaptured = pendingDrops != null && tag.getBoolean("PendingDropsCaptured");
         Arrays.fill(cargo, null); NBTTagList list = tag.getTagList("Cargo", 10);
         for (int i = 0; i < list.tagCount(); i++) { NBTTagCompound entry = list.getCompoundTagAt(i); int slot = entry.getByte("Slot") & 255; if (slot < cargo.length) cargo[slot] = ItemStack.loadItemStackFromNBT(entry); }
+        overflowDrops.clear(); NBTTagList overflow = tag.getTagList("OverflowDrops",10);
+        for (int i = 0; i < overflow.tagCount(); i++) {
+            ItemStack stack = ItemStack.loadItemStackFromNBT(overflow.getCompoundTagAt(i));
+            if (stack != null && stack.stackSize > 0) overflowDrops.add(stack);
+        }
     }
     protected void dropFewItems(boolean recentlyHit, int looting) {
         super.dropFewItems(recentlyHit, looting);
         ItemStack tool = getHeldItem();
         if (tool != null) { setCurrentItemOrArmor(0, null); entityDropItem(tool, 0); }
         for (int i = 0; i < cargo.length; i++) if (cargo[i] != null) { entityDropItem(cargo[i], 0); cargo[i] = null; }
+        for (ItemStack stack : overflowDrops) entityDropItem(stack,0);
+        overflowDrops.clear();
         if (torches != null) { entityDropItem(torches, 0); torches = null; }
     }
     // The tool slot is a view of EntityLiving's equipment, never a second stored stack.

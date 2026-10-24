@@ -115,16 +115,20 @@ public final class GUIMinerNPC extends GuiContainer {
             if (!state.getString("NavigationReason").isEmpty()) {
                 detail(lines,I18n.format("xf.miner.nav."+state.getString("NavigationReason")));
                 if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
-                int[] dest = state.getIntArray("Destination");
-                if (dest.length == 3) detail(lines,I18n.format("xf.miner.destination",coord(dest[0],dest[1],dest[2])));
             }
+            int[] dest = state.getIntArray("Destination"), waypoint = state.getIntArray("Waypoint");
+            if (dest.length == 3) detail(lines,I18n.format("xf.miner.destination",coord(dest[0],dest[1],dest[2])));
+            if (waypoint.length == 3) detail(lines,I18n.format("xf.miner.waypoint",coord(waypoint[0],waypoint[1],waypoint[2])));
             int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
             detail(lines,I18n.format("xf.miner.requests"));
             if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
             if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
             if (tools == 0 && lights == 0) detail(lines,I18n.format("xf.miner.no_requests"));
             detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
-            if (target.length == 3 && "excavate".equals(state.getString("Task"))) detail(lines,coord(target[0],target[1],target[2]));
+            if (!"none".equals(state.getString("StorageReason")))
+                detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
+            if (state.getInteger("Overflow") > 0) detail(lines,I18n.format("xf.miner.overflow",state.getInteger("Overflow")));
+            if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
             int[] c = state.getIntArray("Selection");
             detail(lines,I18n.format("xf.miner.pending")+":");
             if (c.length == 7) {
