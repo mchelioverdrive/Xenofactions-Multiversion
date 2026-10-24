@@ -1,10 +1,8 @@
 package com.hfr.inventory.gui;
 
-import java.io.File;
 import com.hfr.client.XFFactionSetup;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.resources.I18n;
@@ -56,6 +54,4 @@ public class GUIXenofactionsTutorial extends XFListMenu {
         drawCenteredString(fontRendererObj, I18n.format("xf.start.step" + page), width / 2, 28, 0xffdd88);
         super.drawScreen(mx, my, ticks);
     }
-    /** Read-only migration of the former installation-wide dismissal marker. */
-    public static File getFlagFile() { return new File(Minecraft.getMinecraft().mcDataDir, "tutorialflag"); }
 }

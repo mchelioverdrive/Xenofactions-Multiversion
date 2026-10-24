@@ -1,6 +1,7 @@
 package com.hfr.client.earth;
 
 import com.hfr.packet.PacketDispatcher;
+import com.hfr.main.ClientProxy;
 import com.hfr.packet.client.EarthMapRequestPacket;
 import com.hfr.world.earth.map.XFEarthMapData;
 import com.hfr.client.journeymap.ClientClaimOverlayCache;
@@ -19,6 +20,8 @@ import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.resources.I18n;
+import net.minecraft.client.settings.GameSettings;
+import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.world.World;
 import org.lwjgl.BufferUtils;
@@ -29,7 +32,8 @@ import org.lwjgl.opengl.GL11;
 public final class GuiXFEarthMap extends GuiScreen {
     private final GuiScreen parent;
     private boolean introduction;
-    private int introPage;
+    private int introPage, introTextTop;
+    private java.util.List<String> introShortcuts;
     public GuiXFEarthMap() { this(null, false); }
     public GuiXFEarthMap(GuiScreen parent, boolean introduction) {
         this.parent = parent; this.introduction = introduction;
@@ -68,6 +72,8 @@ public final class GuiXFEarthMap extends GuiScreen {
         buttonList.add(new GuiButton(18,10,7,70,18,I18n.format("xf.home.start")));
         buttonList.add(new GuiButton(19,width-80,7,70,18,I18n.format("xf.home.title")));
         if (introduction) {
+            introShortcuts = shortcutLines();
+            introTextTop = 52 + introShortcuts.size() * 11 + 6;
             int w = Math.min(400, width - 36), x = (width - w) / 2;
             buttonList.add(new GuiButton(20,x,height-55,(w-6)/2,20,I18n.format("xf.home.start")));
             buttonList.add(new GuiButton(21,x+(w+6)/2,height-55,(w-6)/2,20,I18n.format("xf.map.explore")));
@@ -166,7 +172,17 @@ public final class GuiXFEarthMap extends GuiScreen {
     private java.util.List<String> introLines() {
         return fontRendererObj.listFormattedStringToWidth(I18n.format("xf.map.intro").replace("\\n","\n"), Math.min(400,width-36));
     }
-    private int introCapacity() { return Math.max(1,(height-145)/11); }
+    private String keyName(KeyBinding binding) {
+        return binding.getKeyCode() == 0 ? I18n.format("xf.key.unbound") : GameSettings.getKeyDisplayString(binding.getKeyCode());
+    }
+    private java.util.List<String> shortcutLines() {
+        int w = Math.min(400, width - 36);
+        java.util.List<String> lines = new java.util.ArrayList<String>();
+        lines.addAll(fontRendererObj.listFormattedStringToWidth(I18n.format("xf.map.open_map", keyName(ClientProxy.xenofactionsMap)), w));
+        lines.addAll(fontRendererObj.listFormattedStringToWidth(I18n.format("xf.map.open_menu", keyName(ClientProxy.xenofactionsMenu)), w));
+        return lines;
+    }
+    private int introCapacity() { return Math.max(1,(height-86-introTextTop)/11); }
     private void dismissIntroduction() {
         if (introduction) { introduction=false; com.hfr.client.XFLoginFlow.complete(); }
     }
@@ -260,11 +276,16 @@ public final class GuiXFEarthMap extends GuiScreen {
         drawCenteredString(fontRendererObj, fontRendererObj.trimStringToWidth(I18n.format("gui.hfr.earthmap.controls"),width-16), width / 2, height - 37, 0xaaaaaa);
         if (introduction) {
             int w=Math.min(400,width-36),x=(width-w)/2;
-            drawRect(x-8,28,x+w+8,height-29,0xf0182333);
-            drawCenteredString(fontRendererObj,I18n.format("xf.map.welcome"),width/2,40,0xffdd88);
+            drawRect(x-8,20,x+w+8,height-29,0xf0182333);
+            drawCenteredString(fontRendererObj,I18n.format("xf.map.welcome"),width/2,32,0xffdd88);
+            int shortcutY = 52;
+            for (String line : introShortcuts) {
+                drawString(fontRendererObj, line, x, shortcutY, 0xffffff);
+                shortcutY += 11;
+            }
             java.util.List<String> lines=introLines();
             introPage=Math.min(introPage,Math.max(0,(lines.size()-1)/introCapacity()));
-            for(int i=introPage*introCapacity(),y=60;i<Math.min(lines.size(),(introPage+1)*introCapacity());i++,y+=11)
+            for(int i=introPage*introCapacity(),y=introTextTop;i<Math.min(lines.size(),(introPage+1)*introCapacity());i++,y+=11)
                 drawString(fontRendererObj,lines.get(i),x,y,0xeeeeee);
         }
         for (Object object : buttonList) {

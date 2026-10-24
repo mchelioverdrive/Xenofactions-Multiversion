@@ -2,7 +2,12 @@ package com.hfr.client;
 
 import com.hfr.client.earth.GuiXFEarthMap;
 import com.hfr.inventory.gui.GUIDailyReward;
-import com.hfr.inventory.gui.GUIXenofactionsTutorial;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.attribute.BasicFileAttributes;
+import com.hfr.util.XFLog;
 import com.hfr.packet.PacketDispatcher;
 import com.hfr.packet.XFOnboardingPacket;
 import cpw.mods.fml.relauncher.Side;
@@ -32,9 +37,9 @@ public final class XFLoginFlow {
                 || mc.currentScreen instanceof GuiDownloadTerrain) return;
         if (!requested) {
             requested = true;
-            // Import the old opt-out once; never delete or reset it for existing installations.
-            PacketDispatcher.wrapper.sendToServer(new XFOnboardingPacket.Intent(
-                    GUIXenofactionsTutorial.getFlagFile().exists() ? XFOnboardingPacket.LEGACY_DONE : XFOnboardingPacket.READY));
+            mapPending = !welcomeDismissed();
+            // Synchronize server-owned faction setup regardless of the local welcome preference.
+            PacketDispatcher.wrapper.sendToServer(new XFOnboardingPacket.Intent(XFOnboardingPacket.READY));
             PacketDispatcher.wrapper.sendToServer(com.hfr.packet.daily.DailyActionPacket.loginReady());
         }
         if (!resolved || mc.thePlayer.isDead) return;
@@ -50,17 +55,32 @@ public final class XFLoginFlow {
             else mc.displayGuiScreen(new GUIDailyReward(next));
         }
     }
-    public static void state(boolean show) {
+    public static void state() {
         if (!requested) return;
         resolved = true;
-        if (show) mapPending = true;
+    }
+    private static File flagFile() { return new File(Minecraft.getMinecraft().mcDataDir, "tutorialflag"); }
+    private static boolean welcomeDismissed() {
+        try {
+            Files.readAttributes(flagFile().toPath(), BasicFileAttributes.class);
+            return true;
+        } catch (NoSuchFileException absent) { return false; }
+        catch (IOException | SecurityException e) {
+            XFLog.error("Could not read tutorialflag; queuing the welcome for this connection", e);
+            return false;
+        }
     }
     public static void complete() {
         mapPending = false;
-        PacketDispatcher.wrapper.sendToServer(new XFOnboardingPacket.Intent(XFOnboardingPacket.COMPLETE));
+        try {
+            File flag = flagFile();
+            if (!flag.createNewFile() && !flag.isFile()) throw new IOException("tutorialflag is not a file");
+        } catch (IOException | SecurityException e) { XFLog.error("Could not create tutorialflag; the welcome may appear next connection", e); }
     }
     public static void replay() {
-        PacketDispatcher.wrapper.sendToServer(new XFOnboardingPacket.Intent(XFOnboardingPacket.REPLAY));
+        try { Files.deleteIfExists(flagFile().toPath()); }
+        catch (IOException | SecurityException e) { XFLog.error("Could not delete tutorialflag for welcome replay", e); }
+        mapPending = true;
     }
     public static void daily(NBTTagCompound next) {
         Minecraft mc = Minecraft.getMinecraft();

@@ -117,32 +117,6 @@ public final class DailyRewardService {
         Session session = new Session(); SESSIONS.put(player, session);
         snapshot(player, session, true, false);
     }
-    /** Persist per-player dismissal with the existing atomic native-player snapshot. */
-    public static void onboarding(EntityPlayerMP player, int action) {
-        if (!online(player)) return;
-        if (action >= com.hfr.packet.XFOnboardingPacket.HIDE_SETUP) {
-            com.hfr.clowder.FactionSetupGuide.intent(player, action); return;
-        }
-        boolean show = false;
-        try {
-            NBTTagCompound saved = state(player);
-            boolean change = action == com.hfr.packet.XFOnboardingPacket.COMPLETE
-                || action == com.hfr.packet.XFOnboardingPacket.REPLAY
-                || action == com.hfr.packet.XFOnboardingPacket.LEGACY_DONE && !saved.hasKey("OnboardingComplete");
-            if (change) {
-                saved.setBoolean("OnboardingComplete", action != com.hfr.packet.XFOnboardingPacket.REPLAY);
-                DailyRewardStore.commit(player, saved);
-            }
-            show = !saved.getBoolean("OnboardingComplete");
-        } catch (IOException | IllegalStateException e) {
-            XFLog.error("Could not save onboarding preference for " + player.getUniqueID(), e);
-            player.addChatMessage(new ChatComponentTranslation("xf.onboarding.save_failed"));
-        }
-        // Completion acknowledgements must not queue another opening, even if saving failed.
-        com.hfr.clowder.FactionSetupGuide.sync(player,
-            action != com.hfr.packet.XFOnboardingPacket.COMPLETE && show,
-            action == com.hfr.packet.XFOnboardingPacket.READY || action == com.hfr.packet.XFOnboardingPacket.LEGACY_DONE);
-    }
     /** Readiness is only a hint: loaded server state authorizes this once-per-login opening. */
     public static void loginReady(EntityPlayerMP player) {
         if (!Boolean.FALSE.equals(LOGIN_OPENED.get(player)) || !online(player)) return;

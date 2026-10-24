@@ -38,7 +38,7 @@ public final class FactionSetupGuide {
             NBTTagCompound guide = read(player).getCompoundTag(KEY);
             previousStep = matches(player, guide) ? guide.getInteger("Step") : 0; hidden = guide.getBoolean("Hidden");
         } catch (IllegalStateException unavailable) { /* A blocked/corrupt record authorizes no progress. */ }
-        try { PacketDispatcher.wrapper.sendTo(new XFOnboardingPacket.State(false, previousStep, hidden, false, "xf.setup.save_failed"), player); }
+        try { PacketDispatcher.wrapper.sendTo(new XFOnboardingPacket.State(previousStep, hidden, false, "xf.setup.save_failed"), player); }
         catch (RuntimeException notificationFailure) { XFLog.error("Could not send setup failure", notificationFailure); }
     }
     public static void created(EntityPlayer player) {
@@ -49,7 +49,7 @@ public final class FactionSetupGuide {
             guide.setString("Faction", Clowder.getClowderFromPlayer(player).uuid);
             guide.setInteger("Step", CLAIM); guide.setBoolean("Hidden", false);
             saved.setTag(KEY, guide); DailyRewardStore.commit(mp, saved);
-            sync(mp, false, true);
+            sync(mp, true);
         } catch (IOException | IllegalStateException e) { failed(mp, e); }
     }
     /** Same player-file transaction as the inventory: reconnect/replay cannot repeat this delivery. */
@@ -74,7 +74,7 @@ public final class FactionSetupGuide {
             player.inventoryContainer.detectAndSendChanges(); failed(player, e); return false;
         }
         player.inventoryContainer.detectAndSendChanges();
-        if (guided) sync(player, false, false);
+        if (guided) sync(player, false);
         return true;
     }
     /** A receipt blocks reissuing the first flag even if it is dropped, stored, or a menu is reopened. */
@@ -100,15 +100,15 @@ public final class FactionSetupGuide {
         for (Object raw : MinecraftServer.getServer().getConfigurationManager().playerEntityList) {
             EntityPlayerMP recipient = (EntityPlayerMP)raw;
             Clowder faction = Clowder.getClowderFromPlayer(recipient);
-            if (faction != null && factionId.equals(faction.uuid)) sync(recipient, false, false);
+            if (faction != null && factionId.equals(faction.uuid)) sync(recipient, false);
         }
     }
     public static void commandFinished(net.minecraft.command.ICommandSender sender, String[] args) {
         if (!(sender instanceof EntityPlayerMP) || args.length == 0) return;
         if ("create".equalsIgnoreCase(args[0]) || "claim".equalsIgnoreCase(args[0]) || "sethome".equalsIgnoreCase(args[0]))
-            sync((EntityPlayerMP)sender, false, false, "xf.setup.retry");
+            sync((EntityPlayerMP)sender, false, "xf.setup.retry");
         else if ("leave".equalsIgnoreCase(args[0]) || "join".equalsIgnoreCase(args[0]) || "disband".equalsIgnoreCase(args[0]))
-            sync((EntityPlayerMP)sender, false, false);
+            sync((EntityPlayerMP)sender, false);
     }
     public static void intent(EntityPlayerMP player, int action) {
         try {
@@ -119,16 +119,16 @@ public final class FactionSetupGuide {
                     guide.setBoolean("Hidden", hidden); DailyRewardStore.commit(player, saved);
                 }
             }
-            sync(player, false, action == XFOnboardingPacket.RESUME_SETUP);
+            sync(player, action == XFOnboardingPacket.RESUME_SETUP);
         } catch (IOException | IllegalStateException e) { failed(player, e); }
     }
-    public static void sync(EntityPlayerMP player, boolean welcome, boolean open) {
-        sync(player, welcome, open, "");
+    public static void sync(EntityPlayerMP player, boolean open) {
+        sync(player, open, "");
     }
     public static void rejected(EntityPlayer player, String reason) {
-        if (player instanceof EntityPlayerMP) sync((EntityPlayerMP)player, false, false, reason);
+        if (player instanceof EntityPlayerMP) sync((EntityPlayerMP)player, false, reason);
     }
-    private static void sync(EntityPlayerMP player, boolean welcome, boolean open, String feedback) {
+    private static void sync(EntityPlayerMP player, boolean open, String feedback) {
         XFOnboardingPacket.State snapshot;
         try {
             NBTTagCompound saved = read(player), guide = saved.getCompoundTag(KEY);
@@ -142,7 +142,7 @@ public final class FactionSetupGuide {
                     if (step == DONE) player.addChatMessage(new ChatComponentTranslation("xf.setup.step4"));
                 }
             }
-            snapshot = new XFOnboardingPacket.State(welcome, step, guide.getBoolean("Hidden"), open,
+            snapshot = new XFOnboardingPacket.State(step, guide.getBoolean("Hidden"), open,
                     feedback.length() > 240 ? feedback.substring(0, 240) : feedback);
         } catch (IOException | IllegalStateException e) { failed(player, e); return; }
         // Sending is outside the save transaction; a network failure cannot undo committed delivery.

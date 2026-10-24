@@ -117,11 +117,11 @@ public class ClientProxy extends ServerProxy
         } });
     }
 
-    @Override public void receiveOnboarding(final INetHandler handler, final boolean show, final int step, final boolean hidden, final boolean open, final String feedback) {
+    @Override public void receiveOnboarding(final INetHandler handler, final int step, final boolean hidden, final boolean open, final String feedback) {
         final Minecraft mc = Minecraft.getMinecraft();
         mc.func_152344_a(() -> {
             if (mc.getNetHandler() == handler && mc.thePlayer != null && mc.theWorld != null) {
-                com.hfr.client.XFLoginFlow.state(show);
+                com.hfr.client.XFLoginFlow.state();
                 com.hfr.client.XFFactionSetup.receive(step, hidden, open, feedback);
             }
         });
@@ -172,6 +172,7 @@ public class ClientProxy extends ServerProxy
 	public static KeyBinding tdmMenu = new KeyBinding("key.hfr.tdmmenu", Keyboard.KEY_L, "key.categories.hfr.xenofactions");
 	public static KeyBinding tdmBuyMenu = new KeyBinding("key.hfr.tdmbuy", Keyboard.KEY_B, "key.categories.hfr.xenofactions");
 	public static KeyBinding xenofactionsMenu = new KeyBinding("key.hfr.xfmenu", Keyboard.KEY_K, "key.categories.hfr.xenofactions");
+	public static KeyBinding xenofactionsMap = new KeyBinding("key.hfr.xfmap", Keyboard.KEY_NONE, "key.categories.hfr.xenofactions");
 	public static KeyBinding adminEditor = new KeyBinding("key.hfr.admineditor", Keyboard.KEY_F10, "key.categories.hfr.xenofactions");
 	public static KeyBinding borderVisuals = new KeyBinding("key.hfr.bordervisuals", Keyboard.KEY_RMENU, "key.categories.hfr.xenofactions");
 	
@@ -211,6 +212,7 @@ public class ClientProxy extends ServerProxy
 		ClientRegistry.registerKeyBinding(tdmMenu);
 		ClientRegistry.registerKeyBinding(tdmBuyMenu);
 		ClientRegistry.registerKeyBinding(xenofactionsMenu);
+		ClientRegistry.registerKeyBinding(xenofactionsMap);
 		ClientRegistry.registerKeyBinding(adminEditor);
 		ClientRegistry.registerKeyBinding(borderVisuals);
 		

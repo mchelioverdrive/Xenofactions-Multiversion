@@ -612,6 +612,7 @@ public class EventHandlerClient {
 			while(ClientProxy.borderVisuals.isPressed()) com.hfr.client.journeymap.ClientBorderVisuals.toggle();
 			while(ClientProxy.adminEditor.isPressed()) xfMc.thePlayer.sendChatMessage("/tdm editor gui");
 			while(ClientProxy.xenofactionsMenu.isPressed()) xfMc.displayGuiScreen(new com.hfr.inventory.gui.GUIXenofactionsHome());
+			while(ClientProxy.xenofactionsMap.isPressed()) xfMc.displayGuiScreen(new com.hfr.client.earth.GuiXFEarthMap());
 		}
 		if(event.phase == TickEvent.Phase.END) com.hfr.client.XFLoginFlow.tick();
 	}
