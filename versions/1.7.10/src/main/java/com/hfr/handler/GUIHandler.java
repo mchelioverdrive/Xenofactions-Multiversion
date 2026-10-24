@@ -23,7 +23,21 @@ public class GUIHandler implements IGuiHandler {
 
 	@Override
 	public Object getServerGuiElement(int ID, EntityPlayer player, World world, int x, int y, int z) {
+        if (ID == com.hfr.entity.EntityFactionMiner.GUI_ID) {
+            net.minecraft.entity.Entity worker = world.getEntityByID(x);
+            return worker instanceof com.hfr.entity.EntityFactionMiner && ((com.hfr.entity.EntityFactionMiner)worker).mayManage(player)
+                    ? new com.hfr.inventory.container.ContainerMinerNPC((com.hfr.entity.EntityFactionMiner)worker) : null;
+        }
 		TileEntity entity = world.getTileEntity(x, y, z);
+        if (ID == ModBlocks.guiID_builder || ID == ModBlocks.guiID_builder_npc) {
+            com.hfr.tileentity.machine.TileEntityMachineBuilder depot = com.hfr.builder.BuilderGuiResolver.getDepot(world, x, y, z);
+            if (depot == null || !(player instanceof net.minecraft.entity.player.EntityPlayerMP)
+                    || !com.hfr.builder.BuilderDepotService.mayView((net.minecraft.entity.player.EntityPlayerMP)player, depot)) return null;
+            if (ID == ModBlocks.guiID_builder) return depot.isUseableByPlayer(player) ? new com.hfr.inventory.container.ContainerMachineBuilder(player.inventory, depot) : null;
+            com.hfr.entity.EntityFactionBuilder builder = com.hfr.builder.BuilderGuiResolver.getAssignedBuilder(depot);
+            return builder != null && builder.isUseableByPlayer(player)
+                    ? new com.hfr.inventory.container.ContainerBuilderNPC(player.inventory, depot, builder) : null;
+        }
         if (ID == com.hfr.ender.EnderChestInteraction.GUI_ID) {
             if (world.getBlock(x, y, z) != net.minecraft.init.Blocks.ender_chest || !(entity instanceof net.minecraft.tileentity.TileEntityEnderChest)) return null;
             player.getInventoryEnderChest().func_146031_a((net.minecraft.tileentity.TileEntityEnderChest) entity);
@@ -102,7 +116,17 @@ public class GUIHandler implements IGuiHandler {
 
 	@Override
 	public Object getClientGuiElement(int ID, EntityPlayer player, World world, int x, int y, int z) {
+        if (ID == com.hfr.entity.EntityFactionMiner.GUI_ID) {
+            net.minecraft.entity.Entity worker = world.getEntityByID(x);
+            return worker instanceof com.hfr.entity.EntityFactionMiner ? new com.hfr.inventory.gui.GUIMinerNPC((com.hfr.entity.EntityFactionMiner)worker) : null;
+        }
 		TileEntity entity = world.getTileEntity(x, y, z);
+        if (ID == ModBlocks.guiID_builder || ID == ModBlocks.guiID_builder_npc) {
+            com.hfr.tileentity.machine.TileEntityMachineBuilder depot = com.hfr.builder.BuilderGuiResolver.getDepot(world, x, y, z);
+            if (ID == ModBlocks.guiID_builder) return depot == null ? null : new com.hfr.inventory.gui.GUIMachineBuilder(player.inventory, depot);
+            return new com.hfr.inventory.gui.GUIBuilderNPC(player.inventory, world.provider.dimensionId, x, y, z, depot,
+                    com.hfr.builder.BuilderGuiResolver.getAssignedBuilder(depot));
+        }
         if (ID == com.hfr.ender.EnderChestInteraction.GUI_ID) {
             if (world.getBlock(x, y, z) != net.minecraft.init.Blocks.ender_chest || !(entity instanceof net.minecraft.tileentity.TileEntityEnderChest)) return null;
             player.getInventoryEnderChest().func_146031_a((net.minecraft.tileentity.TileEntityEnderChest) entity);

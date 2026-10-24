@@ -17,6 +17,7 @@ public class ModItems {
 		registerItem();
 	}
 
+    public static Item builder_contract, farmer, miner;
 	public static Item rice;
 	public static Item rice_seeds;
 	public static Item rice_bag;
@@ -63,7 +64,10 @@ public class ModItems {
 	public static ArmorMaterial matGasMask = EnumHelper.addArmorMaterial("GASMASK", 10, new int[] {0, 0, 0, 0}, 0);
 
 	public static void initializeItem()
-	{			
+	{
+        builder_contract = new ItemBuilderContract().setUnlocalizedName("builder_contract").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:farmer");
+        farmer = new ItemWorkerContract(false).setUnlocalizedName("farmer").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:farmer");
+        miner = new ItemWorkerContract(true).setUnlocalizedName("miner").setMaxStackSize(1).setCreativeTab(MainRegistry.tab).setTextureName("hfr:miner");
 
 		components_wood = new ItemLore().setUnlocalizedName("components_wood").setCreativeTab(MainRegistry.tab).setTextureName(RefStrings.MODID + ":components_wood");
 		components_scaffold = new ItemLore().setUnlocalizedName("components_scaffold").setCreativeTab(MainRegistry.tab).setTextureName(RefStrings.MODID + ":components_scaffold");
@@ -119,7 +123,10 @@ public class ModItems {
 		GameRegistry.registerItem(components_mechanical, components_mechanical.getUnlocalizedName());
 		GameRegistry.registerItem(components_electronics, components_electronics.getUnlocalizedName());
 
-		GameRegistry.registerItem(rice, rice.getUnlocalizedName());
+		GameRegistry.registerItem(builder_contract, builder_contract.getUnlocalizedName());
+        GameRegistry.registerItem(farmer, farmer.getUnlocalizedName());
+        GameRegistry.registerItem(miner, miner.getUnlocalizedName());
+        GameRegistry.registerItem(rice, rice.getUnlocalizedName());
 		GameRegistry.registerItem(rice_seeds, rice_seeds.getUnlocalizedName());
 		GameRegistry.registerItem(rice_sticky, rice_sticky.getUnlocalizedName());
 		GameRegistry.registerItem(rice_bag, rice_bag.getUnlocalizedName());

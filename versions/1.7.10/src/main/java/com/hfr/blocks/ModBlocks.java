@@ -21,6 +21,8 @@ public class ModBlocks {
 		registerBlock();
 	}
 
+	public static Block builder;
+    public static final int guiID_builder = 14, guiID_builder_npc = 41;
 	public static Block rice;
 
 	public static Block uni_foundation;
@@ -90,6 +92,7 @@ public class ModBlocks {
     };
 
 	private static void initializeBlock() {
+        builder = new MachineBuilder(Material.iron).setStepSound(soundTypeMetal).setBlockName("builder").setHardness(5F).setResistance(10F).setCreativeTab(MainRegistry.tab);
 
         factionLeaderboard = new BlockFactionLeaderboard().setCreativeTab(MainRegistry.tab);
 
@@ -157,7 +160,8 @@ public class ModBlocks {
 
 		GameRegistry.registerBlock(barricade, ItemBlockLore.class, barricade.getUnlocalizedName());
 		
-		GameRegistry.registerBlock(rice, rice.getUnlocalizedName());
+		GameRegistry.registerBlock(builder, ItemBlockUnstackable.class, builder.getUnlocalizedName());
+        GameRegistry.registerBlock(rice, rice.getUnlocalizedName());
 
 		GameRegistry.registerBlock(uni_foundation, ItemBlockLore.class, uni_foundation.getUnlocalizedName());
 		GameRegistry.registerBlock(asphalt, ItemBlockLore.class, asphalt.getUnlocalizedName());

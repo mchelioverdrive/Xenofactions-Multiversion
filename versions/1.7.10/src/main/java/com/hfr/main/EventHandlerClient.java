@@ -572,6 +572,27 @@ public class EventHandlerClient {
 				LoggingEngine.survey();
 		}
 	}
+
+    @SubscribeEvent
+    public void renderWorkerPlans(RenderWorldLastEvent event) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (mc.theWorld == null || mc.renderViewEntity == null) return;
+        Entity camera = mc.renderViewEntity;
+        double x = camera.lastTickPosX + (camera.posX - camera.lastTickPosX) * event.partialTicks;
+        double y = camera.lastTickPosY + (camera.posY - camera.lastTickPosY) * event.partialTicks;
+        double z = camera.lastTickPosZ + (camera.posZ - camera.lastTickPosZ) * event.partialTicks;
+        try (com.hfr.client.render.RenderState state = new com.hfr.client.render.RenderState()) {
+            for (Object value : mc.theWorld.loadedTileEntityList) if (value instanceof com.hfr.tileentity.machine.TileEntityMachineBuilder) {
+                com.hfr.tileentity.machine.TileEntityMachineBuilder depot = (com.hfr.tileentity.machine.TileEntityMachineBuilder)value;
+                if (depot.preview == null) continue;
+                GL11.glPushMatrix();
+                GL11.glTranslated(depot.previewX - x, depot.previewY - y, depot.previewZ - z);
+                mc.getTextureManager().bindTexture(net.minecraft.client.renderer.texture.TextureMap.locationBlocksTexture);
+                com.hfr.schematic.SchematicRenderer.render(depot.preview, 1F, 0, 0, 0, 0, depot.previewRotation, depot.previewMirrored);
+                GL11.glPopMatrix();
+            }
+        }
+    }
 	
 	private volatile boolean disconnectCleanup;
     private boolean xfHadWorld = false;

@@ -117,6 +117,15 @@ public class ClientProxy extends ServerProxy
         } });
     }
 
+    @Override public void receiveMiner(final INetHandler handler, final int id, final String uuid, final NBTTagCompound state, final String feedback) {
+        final Minecraft mc = Minecraft.getMinecraft();
+        mc.func_152344_a(() -> {
+            if (mc.getNetHandler() == handler && mc.currentScreen instanceof com.hfr.inventory.gui.GUIMinerNPC) {
+                com.hfr.inventory.gui.GUIMinerNPC gui = (com.hfr.inventory.gui.GUIMinerNPC)mc.currentScreen;
+                if (gui.matches(id, uuid)) gui.receive(state, feedback);
+            }
+        });
+    }
     @Override public void receiveOnboarding(final INetHandler handler, final int step, final boolean hidden, final boolean open, final String feedback) {
         final Minecraft mc = Minecraft.getMinecraft();
         mc.func_152344_a(() -> {
@@ -180,6 +189,9 @@ public class ClientProxy extends ServerProxy
 	public void registerRenderInfo()
 	{
 		com.hfr.client.render.GpuModelManager.register();
+        RenderingRegistry.registerEntityRenderingHandler(com.hfr.entity.EntityFactionBuilder.class, new com.hfr.render.living.RenderFactionBuilder());
+        RenderingRegistry.registerEntityRenderingHandler(com.hfr.entity.EntityFarmer.class, new com.hfr.render.living.RenderFarmer());
+        RenderingRegistry.registerEntityRenderingHandler(com.hfr.entity.EntityFactionMiner.class, new com.hfr.render.living.RenderFactionMiner());
         ((net.minecraft.client.resources.IReloadableResourceManager)Minecraft.getMinecraft().getResourceManager()).registerReloadListener(manager -> {
             ResourceManager.reloadBlockModels();
             com.hfr.client.flag.FactionFlagTextureManager.reload();

@@ -99,6 +99,17 @@ public class PacketDispatcher {
         wrapper.registerMessage(com.hfr.packet.client.PlayerActivityPacket.Handler.class, com.hfr.packet.client.PlayerActivityPacket.class, i++, Side.SERVER);
         wrapper.registerMessage(XFOnboardingPacket.ServerHandler.class, XFOnboardingPacket.Intent.class, i++, Side.SERVER);
         wrapper.registerMessage(XFOnboardingPacket.ClientHandler.class, XFOnboardingPacket.State.class, i++, Side.CLIENT);
+        wrapper.registerMessage(com.hfr.packet.builder.MinerActionPacket.Handler.class, com.hfr.packet.builder.MinerActionPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.MinerSnapshotPacket.Handler.class, com.hfr.packet.builder.MinerSnapshotPacket.class, i++, Side.CLIENT);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderActionPacket.Handler.class, com.hfr.packet.builder.BuilderActionPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderDepotRequestPacket.Handler.class, com.hfr.packet.builder.BuilderDepotRequestPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderDepotSnapshotPacket.Handler.class, com.hfr.packet.builder.BuilderDepotSnapshotPacket.class, i++, Side.CLIENT);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderLibraryRequestPacket.Handler.class, com.hfr.packet.builder.BuilderLibraryRequestPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderLibraryPacket.Handler.class, com.hfr.packet.builder.BuilderLibraryPacket.class, i++, Side.CLIENT);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderPlanPacket.Handler.class, com.hfr.packet.builder.BuilderPlanPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicDataRequestPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicDataRequestPacket.class, i++, Side.SERVER);
+        wrapper.registerMessage(com.hfr.packet.builder.BuilderSchematicDataChunkPacket.Handler.class, com.hfr.packet.builder.BuilderSchematicDataChunkPacket.class, i++, Side.CLIENT);
 
 	}
 	

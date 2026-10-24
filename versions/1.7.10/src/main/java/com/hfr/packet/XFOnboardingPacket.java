@@ -9,7 +9,7 @@ import net.minecraft.entity.player.EntityPlayerMP;
 
 /** Faction setup intents and server-confirmed guidance. Welcome dismissal stays on the client. */
 public final class XFOnboardingPacket {
-    public static final int READY = 0, HIDE_SETUP = 4, SHOW_SETUP = 5, RESUME_SETUP = 6;
+    public static final int READY = 0, HIDE_SETUP = 4, SHOW_SETUP = 5, RESUME_SETUP = 6, COMPLETE_SETUP = 7;
     private XFOnboardingPacket() { }
     public static final class Intent implements IMessage {
         private int action;
@@ -17,7 +17,7 @@ public final class XFOnboardingPacket {
         public Intent(int action) { this.action = action; }
         public void fromBytes(ByteBuf buf) {
             action = buf.readUnsignedByte();
-            if ((action != READY && (action < HIDE_SETUP || action > RESUME_SETUP)) || buf.isReadable())
+            if ((action != READY && (action < HIDE_SETUP || action > COMPLETE_SETUP)) || buf.isReadable())
                 throw new IllegalArgumentException("Invalid onboarding intent");
         }
         public void toBytes(ByteBuf buf) { buf.writeByte(action); }
@@ -35,7 +35,7 @@ public final class XFOnboardingPacket {
             int length = buf.readUnsignedShort();
             if (length > 1024 || length > buf.readableBytes()) throw new IllegalArgumentException("Invalid setup feedback");
             byte[] bytes = new byte[length]; buf.readBytes(bytes); feedback = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-            if (step > 4 || buf.isReadable()) throw new IllegalArgumentException("Invalid setup snapshot");
+            if (step > 5 || buf.isReadable()) throw new IllegalArgumentException("Invalid setup snapshot");
         }
         public void toBytes(ByteBuf buf) {
             buf.writeByte(step); buf.writeBoolean(hidden); buf.writeBoolean(open);

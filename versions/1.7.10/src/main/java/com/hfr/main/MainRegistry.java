@@ -329,6 +329,8 @@ public class MainRegistry
 		}
 	}
 
+    public static final java.util.List<com.hfr.schematic.Schematic> schems = new java.util.ArrayList<com.hfr.schematic.Schematic>();
+
 	@EventHandler
 	public void PreLoad(FMLPreInitializationEvent PreEvent)
 	{
@@ -339,6 +341,7 @@ public class MainRegistry
 		ModItems.mainRegistry();
 		XFAchievements.register();
 		loadConfig(PreEvent);
+        com.hfr.schematic.SchematicLibrary.get().initialize(PreEvent.getModConfigurationDirectory());
 
 		com.hfr.world.earth.XFEarthRegistry.register();
 		MinecraftForge.EVENT_BUS.register(new com.hfr.world.earth.XFEarthWorldValidationHandler());
@@ -346,6 +349,9 @@ public class MainRegistry
         MinecraftForge.EVENT_BUS.register(new com.hfr.clowder.ClaimTerrainService());
 		FMLCommonHandler.instance().bus().register(com.hfr.world.earth.network.XFEarthHeightSync.events());
 		CraftingManager.mainRegistry();
+        cpw.mods.fml.common.registry.EntityRegistry.registerModEntity(com.hfr.entity.EntityFarmer.class, "entity_hfr_slave", 22, this, 80, 3, true);
+        cpw.mods.fml.common.registry.EntityRegistry.registerModEntity(com.hfr.entity.EntityFactionBuilder.class, "entity_hfr_faction_builder", 23, this, 80, 3, true);
+        cpw.mods.fml.common.registry.EntityRegistry.registerModEntity(com.hfr.entity.EntityFactionMiner.class, "entity_hfr_faction_miner", 27, this, 80, 3, true);
 		proxy.registerRenderInfo();
 
 		MainRegistry.loadCustomDrops();
@@ -540,6 +546,7 @@ public class MainRegistry
 
 		NetworkRegistry.INSTANCE.registerGuiHandler(instance, new GUIHandler());
 
+        GameRegistry.registerTileEntity(TileEntityMachineBuilder.class, "tileentity_hfr_builder");
 		GameRegistry.registerTileEntity(TileEntityDebug.class, "tileentity_hfr_devon_truck");
 		GameRegistry.registerTileEntity(TileEntityMachineNet.class, "tileentity_hfr_net");
 		GameRegistry.registerTileEntity(TileEntityMachineUni.class, "tileentity_hfr_university");

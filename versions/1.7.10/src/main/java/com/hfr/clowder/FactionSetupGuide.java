@@ -15,7 +15,8 @@ import net.minecraft.util.ChatComponentTranslation;
 
 /** Server-thread results only. The guide never performs a claim or sets a home itself. */
 public final class FactionSetupGuide {
-    public static final int CLAIM = 1, PLACE = 2, HOME = 3, DONE = 4;
+    // Keep historical DONE=4 terminal. Only newly confirmed homes enter MULTITOOL.
+    public static final int CLAIM = 1, PLACE = 2, HOME = 3, DONE = 4, MULTITOOL = 5;
     private static final String KEY = "FactionSetup";
     private FactionSetupGuide() { }
 
@@ -113,7 +114,9 @@ public final class FactionSetupGuide {
     public static void intent(EntityPlayerMP player, int action) {
         try {
             NBTTagCompound saved = read(player), guide = saved.getCompoundTag(KEY);
-            if (matches(player, guide) && guide.getInteger("Step") < DONE) {
+            if (matches(player, guide) && action == XFOnboardingPacket.COMPLETE_SETUP && guide.getInteger("Step") == MULTITOOL) {
+                guide.setInteger("Step", DONE); DailyRewardStore.commit(player, saved);
+            } else if (matches(player, guide) && guide.getInteger("Step") != DONE && action != XFOnboardingPacket.COMPLETE_SETUP) {
                 boolean hidden = action == XFOnboardingPacket.HIDE_SETUP;
                 if (guide.getBoolean("Hidden") != hidden) {
                     guide.setBoolean("Hidden", hidden); DailyRewardStore.commit(player, saved);
@@ -136,10 +139,10 @@ public final class FactionSetupGuide {
             Clowder faction = Clowder.getClowderFromPlayer(player);
             // Only an explicitly started guide can resume. Existing faction membership never starts one.
             if (step > 0 && step < DONE && (faction.citiesFounded > 0 || faction.getOwnedCityCount() > 0)) {
-                int confirmed = faction.homeSet && faction.hasValidBuildGraceHome() ? DONE : HOME;
+                int confirmed = feedback.isEmpty() && faction.homeSet && faction.hasValidBuildGraceHome() ? MULTITOOL : HOME;
                 if (confirmed > step) {
                     guide.setInteger("Step", confirmed); DailyRewardStore.commit(player, saved); step = confirmed;
-                    if (step == DONE) player.addChatMessage(new ChatComponentTranslation("xf.setup.step4"));
+                    if (step == MULTITOOL) player.addChatMessage(new ChatComponentTranslation("xf.setup.step4"));
                 }
             }
             snapshot = new XFOnboardingPacket.State(step, guide.getBoolean("Hidden"), open,

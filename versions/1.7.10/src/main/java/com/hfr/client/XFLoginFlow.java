@@ -32,6 +32,9 @@ public final class XFLoginFlow {
         if (current != connection || current == null) {
             connection = current; requested = resolved = mapPending = false; daily = null; dailyWorld = null;
             XFFactionSetup.reset();
+            com.hfr.packet.builder.BuilderLibraryPacket.clearClient();
+            com.hfr.packet.builder.BuilderDepotSnapshotPacket.clearClient();
+            com.hfr.packet.builder.BuilderSchematicDataChunkPacket.ClientCache.clear();
         }
         if (current == null || mc.thePlayer == null || mc.theWorld == null
                 || mc.currentScreen instanceof GuiDownloadTerrain) return;

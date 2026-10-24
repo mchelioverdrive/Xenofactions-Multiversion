@@ -35,7 +35,7 @@ public final class DailyRewardStore {
         if (tag.hasKey("FactionSetup")) {
             NBTTagCompound guide = tag.getCompoundTag("FactionSetup");
             if (!tag.hasKey("FactionSetup", 10) || !guide.hasKey("Faction", 8) || guide.getString("Faction").length() != 36
-                    || !guide.hasKey("Step", 3) || guide.getInteger("Step") < 1 || guide.getInteger("Step") > 4
+                    || !guide.hasKey("Step", 3) || guide.getInteger("Step") < 1 || guide.getInteger("Step") > 5
                     || !guide.hasKey("Hidden", 1))
                 throw new IllegalStateException("Malformed faction setup state");
         }

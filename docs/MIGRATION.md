@@ -289,6 +289,9 @@ Remaining implementation is explicit pre-UUID binding, XShop/terminals, full edi
 
 ## Maintained content cleanup
 
+The cleanup inventories below record the earlier removal. The Forge 1.7.10 native Builder Depot, Builder Contract, builder entity, schematic/job storage, supporting worker GUIs/packets and builder limits have since been restored from the local pre-cleanup source, together with the old farmer. A new native miner uses real terrain, supplied tools and the existing stone-drop event path. Their historical item/entity/tile identities are active again; the old miner item identity is now a spawn contract, without restoring the removed Coal Mine machine or miner-supplies production path. See [current worker behavior and persistence](1.7.10/getting-started.md#native-faction-workers) and [restored settings](1.7.10/configuration.md#restored-faction-workers). Other removed systems below remain excluded; this restoration applies only to 1.7.10.
+
+
 ### Active maintained systems and roadmap
 
 1.7.10 keeps factions/cities/capitals/homes/claims/zones, diplomacy/war, core prestige/upkeep/accounting, XShop and faction terminals, flags/wall art, fortifications, multitools and active admin tools, stone drops, Earth/map systems, kits/TDM/Search and Destroy/FFA/editor/overlays, and Net/Grain Mill/University/Temple/Statue/Production Line. Production and research stop at their original level-one materials.

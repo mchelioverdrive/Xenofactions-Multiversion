@@ -7,6 +7,7 @@ import com.hfr.inventory.gui.GUIXenofactionsHome;
 import com.hfr.inventory.gui.GUIXenofactionsMenu;
 import com.hfr.inventory.gui.GUIXenofactionsTutorial;
 import com.hfr.inventory.gui.GUIXFHelp;
+import com.hfr.inventory.gui.GUIXFMultitool;
 import com.hfr.packet.PacketDispatcher;
 import com.hfr.packet.XFOnboardingPacket;
 import cpw.mods.fml.relauncher.Side;
@@ -17,21 +18,29 @@ import net.minecraft.client.gui.GuiChat;
 import net.minecraft.client.resources.I18n;
 import org.lwjgl.opengl.GL11;
 
-/** Presentation of confirmed server progress; closing a screen never changes the step. */
+/** Server-confirmed gameplay progress; closing the final information screen only acknowledges guidance. */
 @SideOnly(Side.CLIENT)
 public final class XFFactionSetup {
     private static int step, completionTicks;
-    private static boolean hidden, pending, refresh;
+    private static boolean hidden, pending, refresh, multitoolOpened;
     private static String waiting = "";
     private XFFactionSetup() { }
-    public static void reset() { step = completionTicks = 0; hidden = pending = refresh = false; waiting = ""; }
-    public static boolean active() { return step > 0 && step < 4; }
+    public static void reset() { step = completionTicks = 0; hidden = pending = refresh = multitoolOpened = false; waiting = ""; }
+    public static boolean active() { return step > 0 && step != 4; }
     public static boolean hidden() { return hidden; }
     public static boolean visible() { return !hidden && (active() || completionTicks > 0); }
     public static boolean blocksAutomaticScreens() { return active() && !hidden || pending || completionTicks > 0; }
     public static boolean consumeMenuRefresh() { boolean result = refresh; refresh = false; return result; }
     public static void toggle() { intent(hidden ? XFOnboardingPacket.SHOW_SETUP : XFOnboardingPacket.HIDE_SETUP); }
     public static void resume() { intent(XFOnboardingPacket.RESUME_SETUP); }
+    public static void completeMultitool() {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (step == 5 && mc.thePlayer != null && mc.thePlayer.isDead) {
+            multitoolOpened = false; pending = true; return;
+        }
+        if (step == 5 && mc.getNetHandler() != null && mc.thePlayer != null && mc.theWorld != null)
+            intent(XFOnboardingPacket.COMPLETE_SETUP);
+    }
     private static void intent(int action) { PacketDispatcher.wrapper.sendToServer(new XFOnboardingPacket.Intent(action)); }
     public static boolean waitForResult(String action) {
         if ("c_create".equals(action) || active() && ("c_claim".equals(action) || "c_sethome".equals(action))) {
@@ -44,16 +53,17 @@ public final class XFFactionSetup {
         int previous = step;
         boolean wasWaiting = !waiting.isEmpty();
         step = next; hidden = hide; refresh = true;
+        if (next != 5 || "xf.setup.save_failed".equals(feedback)) multitoolOpened = false;
         if (next != 4) completionTicks = 0;
         if (next == 4 && previous > 0 && previous < 4 && !hidden) completionTicks = 100;
-        if (next != 1 && next != 3 || hidden) pending = false;
-        else if ((open || next != previous) && (next == 1 || next == 3)) pending = true;
+        if (next != 1 && next != 3 && next != 5 || hidden) pending = false;
+        else if ((open || next != previous) && !multitoolOpened) pending = true;
         if (wasWaiting && (!feedback.isEmpty() || next != previous) && mc.currentScreen instanceof GUIXenofactionsMenu) {
             GUIXenofactionsMenu menu = (GUIXenofactionsMenu)mc.currentScreen;
             if (menu.isAction(waiting)) {
                 menu.setupResult(!feedback.isEmpty() ? feedback.startsWith("xf.setup.") ? I18n.format(feedback) : feedback
                         : next == previous ? I18n.format("xf.setup.retry") : "");
-                if (next == 2 && "c_claim".equals(waiting) || next == 4 && "c_sethome".equals(waiting)) mc.displayGuiScreen(null);
+                if (next == 2 && "c_claim".equals(waiting) || next == 5 && "c_sethome".equals(waiting)) mc.displayGuiScreen(null);
             }
         }
         if (!feedback.isEmpty() || next != previous) waiting = "";
@@ -71,6 +81,11 @@ public final class XFFactionSetup {
                 && !(mc.currentScreen instanceof GUIXFHelp)
                 && !(mc.currentScreen instanceof GUIXenofactionsMenu && ((GUIXenofactionsMenu)mc.currentScreen).isSetupForm())) return;
         pending = false;
+        if (step == 5) {
+            multitoolOpened = true;
+            mc.displayGuiScreen(new GUIXFMultitool());
+            return;
+        }
         // Retire only the previous setup form, so requestAndOpen can use its normal dispatch path.
         if (mc.currentScreen instanceof GUIXenofactionsMenu) mc.displayGuiScreen(null);
         GUIXenofactionsMenu.requestAndOpen(new GUIXenofactionsTutorial(), step == 1 ? "c_claim" : "c_sethome");
