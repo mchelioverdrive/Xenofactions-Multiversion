@@ -98,6 +98,14 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
+            int[] recoveryStart = state.getIntArray("RecoveryOrigin"), recoveryEnd = state.getIntArray("RecoveryDestination");
+            if (recoveryStart.length == 3) {
+                detail(lines,I18n.format("xf.miner.recovery_origin",coord(recoveryStart[0],recoveryStart[1],recoveryStart[2])));
+                detail(lines,recoveryEnd.length == 3 ? I18n.format("xf.miner.recovery_destination",coord(recoveryEnd[0],recoveryEnd[1],recoveryEnd[2]))
+                        : I18n.format("xf.miner.recovery_no_destination"));
+                detail(lines,I18n.format("xf.miner.recovery_attempts",state.getInteger("RecoveryAttempts")));
+                if (!state.getString("NavigationReason").isEmpty()) detail(lines,I18n.format("xf.miner.nav."+state.getString("NavigationReason")));
+            }
             int[] p = state.getIntArray("Plan"), target = state.getIntArray("Target");
             detail(lines,I18n.format("xf.miner.station")+":");
             detail(lines,state.getBoolean("StationAssigned") ? "D"+state.getInteger("Dimension")+": "+coord(p[0],p[1],p[2]) : I18n.format("xf.miner.no_chest"));
@@ -112,7 +120,7 @@ public final class GUIMinerNPC extends GuiContainer {
                 detail(lines,coord(proposed[3],proposed[8],proposed[4])+" > "+coord(proposed[5],proposed[7],proposed[6]));
                 bounds(lines,proposed,state.getBoolean("ProposedDown"));
             }
-            if (!state.getString("NavigationReason").isEmpty()) {
+            if (recoveryStart.length != 3 && !state.getString("NavigationReason").isEmpty()) {
                 detail(lines,I18n.format("xf.miner.nav."+state.getString("NavigationReason")));
                 if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
             }

@@ -92,6 +92,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private final java.util.List<int[]> returnRoute = new java.util.ArrayList<int[]>();
     private final java.util.List<int[]> travelRoute = new java.util.ArrayList<int[]>();
     private int routeIndex, segmentEnd, routeRetries;
+    // A temporary trip, never a job/corridor change or part of the storage return cache.
+    private static final int RECOVERY_RADIUS = 64, RECOVERY_HEIGHT = 16, RECOVERY_COST = 2560;
+    private static final int RECOVERY_ATTEMPTS = 3, RECOVERY_TICKS = 2400;
+    private final java.util.List<int[]> recoveryRoute = new java.util.ArrayList<int[]>();
+    private boolean recoveringCorridor;
+    private int[] recoveryOrigin, recoveryDestination;
+    private int recoveryAttempts, recoveryTicks;
+    private final java.util.List<AxisAlignedBB> recoveryCollisions = new java.util.ArrayList<AxisAlignedBB>();
     private final java.util.List<ItemStack> overflowDrops = new java.util.ArrayList<ItemStack>();
     private String capacityDetail = "";
     private int returnFailureTarget = -1, returnFailures;
@@ -141,10 +149,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         getNavigator().clearPathEntity(); pathTicks = 0;
         destination = waypoint = null; navigationFailures = 0; resetMining();
         travelRoute.clear(); routeIndex = segmentEnd = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
+        recoveringCorridor = false; recoveryOrigin = recoveryDestination = null; recoveryRoute.clear();
+        recoveryAttempts = recoveryTicks = 0;
     }
     private String taskDiagnostic(String reason) {
         return "Miner " + getUniqueID() + " task=" + task.key + " reason=" + reason + " storage=" + storageReason.key
                 + " pos=" + posX+","+posY+","+posZ + " destination=" + Arrays.toString(destination)
+                + " recoveryOrigin=" + Arrays.toString(recoveryOrigin) + " recoveryDestination=" + Arrays.toString(recoveryDestination)
                 + " waypoint=" + Arrays.toString(waypoint) + " cursor=" + cursor + " target=" + targetCursor + " cleanup=" + rampCleanup;
     }
     private void transition(Task next, String reason, int[] goal) {
@@ -289,24 +300,27 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             rejectedTargets.clear(); returnFailures = 0; returnFailureTarget = -1;
             searchOffset = 0;
             // Resume an explicit saved trip, never infer a trip from partial cargo.
-            if (storageTask()) destination = new int[] {plan[0],plan[1],plan[2]};
-            else returnToWork("start/resume");
+            destination = storageTask() ? new int[] {plan[0],plan[1],plan[2]} : workDestination();
         }
+        if (!recoveringCorridor && !inCorridor((int)Math.floor(posX),(int)Math.floor(posZ))) beginCorridorRecovery();
         return new Activation("");
     }
     public void onLivingUpdate() {
+        if (!worldObj.isRemote && running && configured && !recoveringCorridor
+                && !inCorridor((int)Math.floor(posX),(int)Math.floor(posZ))) beginCorridorRecovery();
         // Native following checks neighboring cells while shortcutting. Do not let those checks
         // discover unloaded chunks even though our planned route itself only uses loaded cells.
         if (!worldObj.isRemote && !getNavigator().noPath() && waypoint != null && !segmentChunksLoaded(waypoint)) {
-            getNavigator().clearPathEntity(); status = "chunk"; pathTicks = 0;
+            getNavigator().clearPathEntity(); status = recoveringCorridor ? "corridor_recovery" : "chunk";
+            navigationReason = "chunk"; pathTicks = 0;
         }
-        if (!worldObj.isRemote && !getNavigator().noPath() && destination != null
+        if (!worldObj.isRemote && !recoveringCorridor && !getNavigator().noPath() && destination != null
                 && atDestination(destination[0],destination[1],destination[2],task == Task.TO_WORK && pendingDrops == null))
             arrived();
         super.onLivingUpdate();
         if (worldObj.isRemote || !running || ticksExisted % 10 != 0) return;
         try {
-            if (supplyCheckTicks > 0) supplyCheckTicks -= 10;
+            if (supplyCheckTicks > 0 && !recoveringCorridor && inCorridor((int)Math.floor(posX),(int)Math.floor(posZ))) supplyCheckTicks -= 10;
             else work();
             updateRequests(); notifySupplies();
         }
@@ -321,6 +335,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!configured || !authorized()) { stop("denied"); return; }
         if (jobDimension != dimension) { stop("dimension"); return; }
         if (!WorkerAccess.ownsLand(worldObj, plan[0], plan[2], factionId)) { stop("denied"); return; }
+        // Recover before inventory-driven trips, work scans or interaction can change the saved task.
+        if (recoverCorridor()) return;
         equipCarriedTool();
         stockTorchesFromCargo();
         if (suitable(getHeldItem())) requestedTools = 0;
@@ -511,74 +527,137 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return actor;
     }
+    private void beginCorridorRecovery() {
+        // Retain task, storage reason, interaction destination and all job/item state.
+        getNavigator().clearPathEntity(); travelRoute.clear(); recoveryRoute.clear(); waypoint = null;
+        pathTicks = navigationFailures = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
+        recoveryOrigin = new int[] {(int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.1),(int)Math.floor(posZ)};
+        recoveryDestination = null; recoveryAttempts = recoveryTicks = 0; recoveringCorridor = true;
+        resetMining(); status = "corridor_recovery";
+        navigationReason = "outside"; navigationDetail = "Recovery origin=" + Arrays.toString(recoveryOrigin);
+    }
+    /** Returns true while recovery owns movement, including the tick that finishes or stops it. */
+    private boolean recoverCorridor() {
+        int x = (int)Math.floor(posX), y = (int)Math.floor(boundingBox.minY+.1), z = (int)Math.floor(posZ);
+        if (!recoveringCorridor) {
+            if (inCorridor(x,z)) return false;
+            beginCorridorRecovery();
+        }
+        recoveryTicks += 10;
+        if (!inRecoveryBounds(x,y,z) || recoveryTicks > RECOVERY_TICKS) {
+            if (!inRecoveryBounds(x,y,z) || !"chunk".equals(navigationReason)) navigationReason = "recovery_limit";
+            navigationDetail = "Fixed recovery boundary/time limit; origin=" + Arrays.toString(recoveryOrigin);
+            terminalNavigation(); return true;
+        }
+        if (onGround && inCorridor(x,z) && recoveryStanding(x,y,z)) {
+            // Clear only temporary movement. The next work tick resumes the interrupted task.
+            getNavigator().clearPathEntity(); recoveryRoute.clear(); travelRoute.clear(); waypoint = null;
+            recoveringCorridor = false; recoveryOrigin = recoveryDestination = null;
+            pathTicks = navigationFailures = routeRetries = 0; bestRouteProgress = -Double.MAX_VALUE;
+            navigationReason = navigationDetail = ""; status = task.key; supplyCheckTicks = 0;
+            return true;
+        }
+        moveNear(0,0,0,false,true);
+        if ("route_failed".equals(status)) terminalNavigation();
+        return true;
+    }
+    private boolean inRecoveryBounds(int x,int y,int z) {
+        if (recoveryOrigin == null) return false;
+        long dx = (long)x-recoveryOrigin[0], dz = (long)z-recoveryOrigin[2];
+        return dx*dx+dz*dz <= RECOVERY_RADIUS*RECOVERY_RADIUS && Math.abs(y-recoveryOrigin[1]) <= RECOVERY_HEIGHT;
+    }
     private boolean moveNear(int x, int y, int z) {
         return moveNear(x,y,z,false);
     }
     private boolean atDestination(int x,int y,int z,boolean mining) {
         if (!onGround || getDistanceSq(x+.5,y,z+.5) > 9 || mining && cursor >= totalWork() && posY <= y+.5) return false;
         int px = (int)Math.floor(posX), py = (int)Math.floor(boundingBox.minY+.1), pz = (int)Math.floor(posZ);
-        return standing(px,py,pz,mining ? x : -30000001,mining ? y-1 : -1,z) && (!mining || visible(x,y-1,z));
+        return inCorridor(px,pz) && standing(px,py,pz,mining ? x : -30000001,mining ? y-1 : -1,z) && (!mining || visible(x,y-1,z));
     }
     private void arrived() {
         getNavigator().clearPathEntity(); travelRoute.clear(); waypoint = null;
         pathTicks = navigationFailures = routeRetries = 0; navigationReason = navigationDetail = "";
     }
     private boolean moveNear(int x, int y, int z, boolean mining) {
-        status = task.key;
+        return moveNear(x,y,z,mining,false);
+    }
+    private boolean moveNear(int x, int y, int z, boolean mining, boolean recovery) {
+        List<int[]> route = recovery ? recoveryRoute : travelRoute;
+        status = recovery ? "corridor_recovery" : task.key;
         int[] goal = new int[] {x,y,z};
-        if (!Arrays.equals(destination,goal)) { resetPath(); destination = goal; }
-        if (atDestination(x,y,z,mining)) { arrived(); return true; }
-        if (task == Task.MINING || task == Task.DROPS) transition(Task.TO_WORK,"work position changed",goal);
-        else if (storageTask() && task != Task.TO_STORAGE) transition(Task.TO_STORAGE,"station interaction position changed",goal);
+        if (!recovery) {
+            if (!Arrays.equals(destination,goal)) { resetPath(); destination = goal; }
+            if (atDestination(x,y,z,mining)) { arrived(); return true; }
+            if (task == Task.MINING || task == Task.DROPS) transition(Task.TO_WORK,"work position changed",goal);
+            else if (storageTask() && task != Task.TO_STORAGE) transition(Task.TO_STORAGE,"station interaction position changed",goal);
+        }
+        String movingStatus = recovery ? "corridor_recovery" : task.key;
         resetMining();
         if (!onGround) {
-            getNavigator().clearPathEntity(); pathTicks += 10; status = "recovering";
-            if (pathTicks >= 100) { navigationReason = "footing"; status = "route_failed"; }
+            getNavigator().clearPathEntity(); pathTicks += 10; status = recovery ? movingStatus : "recovering";
+            if (pathTicks >= 100) { navigationReason = "footing"; navigationDetail = "Start has no supported footing"; status = "route_failed"; }
             return false;
         }
         if (waypoint != null && !segmentChunksLoaded(waypoint)) {
-            getNavigator().clearPathEntity(); status = "chunk"; pathTicks = 0; return false;
+            getNavigator().clearPathEntity(); status = recovery ? movingStatus : "chunk";
+            navigationReason = "chunk"; pathTicks = 0;
+            if (!recovery) return false;
+            // A different loaded entry may remain reachable. Replan inside the original bounds.
+            route.clear(); waypoint = null; routeRetries++;
         }
-        if (!travelRoute.isEmpty()) {
+        if (!route.isEmpty()) {
             int previous = routeIndex;
-            for (int i = routeIndex+1; i <= segmentEnd && i < travelRoute.size(); i++) {
-                int[] next = travelRoute.get(i);
+            for (int i = routeIndex+1; i <= segmentEnd && i < route.size(); i++) {
+                int[] next = route.get(i);
                 if (getDistanceSq(next[0]+.5,next[1],next[2]+.5) < .36) routeIndex = i;
             }
-            int[] next = travelRoute.get(Math.min(routeIndex+1,travelRoute.size()-1));
+            int[] next = route.get(Math.min(routeIndex+1,route.size()-1));
             double progress = routeIndex-Math.min(1,Math.sqrt(getDistanceSq(next[0]+.5,next[1],next[2]+.5)));
             if (progress > bestRouteProgress+.1) { bestRouteProgress = progress; pathTicks = 0; }
             else pathTicks += 10;
             if (routeIndex > previous) navigationFailures = 0;
-            boolean intact = routeIntact(travelRoute,routeIndex,Math.min(travelRoute.size()-1,routeIndex+8),
-                    mining ? x : -30000001,mining ? y-1 : -1,z);
+            boolean intact = routeIntact(route,routeIndex,Math.min(route.size()-1,routeIndex+8),
+                    mining ? x : -30000001,mining ? y-1 : -1,z,recovery);
             if (!intact || getDistanceSq(next[0]+.5,next[1],next[2]+.5) > 16 || pathTicks >= 100) {
                 navigationReason = intact ? "stalled" : "path";
-                navigationDetail = "Route stopped at step " + routeIndex + "/" + (travelRoute.size()-1)
+                if (!intact) for (int i = routeIndex; i <= Math.min(route.size()-1,routeIndex+8); i++) {
+                    int[] p = route.get(i);
+                    if (!worldObj.blockExists(p[0],p[1]-1,p[2]) || !worldObj.blockExists(p[0],p[1]+1,p[2])) {
+                        navigationReason = "chunk"; break;
+                    }
+                }
+                navigationDetail = "Route stopped at step " + routeIndex + "/" + (route.size()-1)
                         + "; next=" + Arrays.toString(next) + (intact ? "; no forward route progress" : "; footing/headroom changed");
-                getNavigator().clearPathEntity(); travelRoute.clear(); routeRetries++; pathTicks = 0;
-            } else if (!getNavigator().noPath()) { status = task.key; return false; }
-            else if (routeIndex+1 >= travelRoute.size()) {
+                getNavigator().clearPathEntity(); route.clear(); routeRetries++; pathTicks = 0;
+            } else if (!getNavigator().noPath()) { status = movingStatus; return false; }
+            else if (routeIndex+1 >= route.size()) {
                 // A valid path endpoint is still not arrival unless the interaction check above succeeds.
                 navigationReason = "standing"; navigationDetail = "Route endpoint no longer permits interaction";
-                travelRoute.clear(); routeRetries++;
+                route.clear(); routeRetries++;
             }
         }
         if (routeRetries >= 4 || navigationFailures >= 3) { status = "route_failed"; return false; }
-        if (travelRoute.isEmpty()) {
-            List<int[]> goals = standingCandidates(x,y,z,mining);
-            if (goals.isEmpty()) { navigationReason = "standing"; navigationDetail = standingObstruction(x,y,z); }
+        if (route.isEmpty()) {
+            if (recovery && recoveryAttempts >= RECOVERY_ATTEMPTS) { status = "route_failed"; return false; }
+            List<int[]> goals = recovery ? java.util.Collections.<int[]>emptyList() : standingCandidates(x,y,z,mining);
+            if (!recovery && goals.isEmpty()) { navigationReason = "standing"; navigationDetail = standingObstruction(x,y,z); }
             else {
                 // Search complete routes first, including direct approaches; a verified cached
                 // route remains a safe fallback when the bounded search cannot rediscover it.
-                List<int[]> route = searchRoute(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
-                if (route == null) route = cachedTravel(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
-                if (route != null && !route.isEmpty()) {
-                    travelRoute.addAll(route); routeIndex = segmentEnd = 0;
+                if (recovery) recoveryAttempts++;
+                List<int[]> found = searchRoute(goals,mining ? x : -30000001,mining ? y-1 : -1,z,recovery);
+                if (found == null && !recovery) found = cachedTravel(goals,mining ? x : -30000001,mining ? y-1 : -1,z);
+                if (found != null && !found.isEmpty()) {
+                    route.addAll(found); routeIndex = segmentEnd = 0;
+                    if (recovery) recoveryDestination = found.get(found.size()-1).clone();
                     bestRouteProgress = -Double.MAX_VALUE; pathTicks = 0;
                 }
             }
-            if (travelRoute.isEmpty()) {
+            if (route.isEmpty()) {
+                if (recovery) {
+                    status = recoveryAttempts >= RECOVERY_ATTEMPTS || "footing".equals(navigationReason) ? "route_failed" : movingStatus;
+                    return false;
+                }
                 if (!"chunk".equals(status)) { navigationFailures++; status = navigationFailures >= 3 ? "route_failed" : "recovering"; }
                 return false;
             }
@@ -586,33 +665,40 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         // Route candidates are ranked by complete safe route cost, not an angular rotation.
         // Give vanilla only a straight, verified run (at most six edges). Its shortcutting cannot
         // cut a corner across water/a pit or bypass a height change on these segments.
-        segmentEnd = Math.min(routeIndex+1,travelRoute.size()-1);
-        int[] from = travelRoute.get(routeIndex), first = travelRoute.get(segmentEnd);
+        segmentEnd = Math.min(routeIndex+1,route.size()-1);
+        int[] from = route.get(routeIndex), first = route.get(segmentEnd);
         int dx = first[0]-from[0], dz = first[2]-from[2];
-        if (segmentEnd > routeIndex && first[1] == from[1]) while (segmentEnd+1 < travelRoute.size() && segmentEnd-routeIndex < 6) {
-            int[] a = travelRoute.get(segmentEnd), b = travelRoute.get(segmentEnd+1);
+        if (segmentEnd > routeIndex && first[1] == from[1]) while (segmentEnd+1 < route.size() && segmentEnd-routeIndex < 6) {
+            int[] a = route.get(segmentEnd), b = route.get(segmentEnd+1);
             if (b[1] != a[1] || b[0]-a[0] != dx || b[2]-a[2] != dz) break;
             segmentEnd++;
         }
         PathPoint[] points = new PathPoint[segmentEnd-routeIndex+1];
         for (int i = 0; i < points.length; i++) {
-            int[] node = travelRoute.get(routeIndex+i); points[i] = new PathPoint(node[0],node[1],node[2]);
+            int[] node = route.get(routeIndex+i); points[i] = new PathPoint(node[0],node[1],node[2]);
         }
-        waypoint = travelRoute.get(segmentEnd).clone();
-        if (!segmentChunksLoaded(waypoint)) { status = "chunk"; pathTicks = 0; return false; }
+        waypoint = route.get(segmentEnd).clone();
+        if (!segmentChunksLoaded(waypoint)) { status = recovery ? movingStatus : "chunk"; navigationReason = "chunk"; pathTicks = 0; return false; }
         // setPath compares only coordinates with the previous path, retaining its finished index.
         getNavigator().clearPathEntity();
         if (!getNavigator().setPath(new PathEntity(points),1)) {
             navigationReason = "path"; navigationDetail = "Navigator rejected verified route segment";
-            travelRoute.clear(); navigationFailures++; status = "recovering"; return false;
+            route.clear(); navigationFailures++; status = recovery ? movingStatus : "recovering"; return false;
         }
-        status = task.key; navigationReason = navigationDetail = ""; return false;
+        status = movingStatus; navigationReason = navigationDetail = ""; return false;
     }
     private boolean segmentChunksLoaded(int[] end) {
         int px = (int)Math.floor(posX), pz = (int)Math.floor(posZ);
         for (int cx = (Math.min(px,end[0])-2)>>4; cx <= (Math.max(px,end[0])+2)>>4; cx++)
             for (int cz = (Math.min(pz,end[2])-2)>>4; cz <= (Math.max(pz,end[2])+2)>>4; cz++)
                 if (!worldObj.blockExists(cx<<4,Math.max(0,Math.min(worldObj.getHeight()-1,(int)posY)),cz<<4)) return false;
+        return true;
+    }
+    private boolean recoveryCellLoaded(int x,int y,int z) {
+        // Match the native follower's neighbor margin while choosing reachable entries.
+        for (int cx = (x-2)>>4; cx <= (x+2)>>4; cx++)
+            for (int cz = (z-2)>>4; cz <= (z+2)>>4; cz++)
+                if (!worldObj.blockExists(cx<<4,y,cz<<4)) return false;
         return true;
     }
     private List<int[]> standingCandidates(int x,int y,int z,boolean mining) {
@@ -639,6 +725,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return true;
     }
+    private boolean recoveryStanding(int x,int y,int z) {
+        if (!standing(x,y,z,-30000001,-1,0)) return false;
+        // Passable materials can still have collision shapes (for example thin snow).
+        // This body fits inside the checked loaded column; do not use world entity/chunk scans.
+        AxisAlignedBB body = AxisAlignedBB.getBoundingBox(x+.5-width/2,y,z+.5-width/2,x+.5+width/2,y+height,z+.5+width/2);
+        recoveryCollisions.clear();
+        for (int dy = -1; dy <= 1; dy++)
+            worldObj.getBlock(x,y+dy,z).addCollisionBoxesToList(worldObj,x,y+dy,z,body,recoveryCollisions,this);
+        return recoveryCollisions.isEmpty();
+    }
     private boolean sight(double sx,double sy,double sz,int x,int y,int z) {
         for (int cx = Math.min((int)Math.floor(sx),x)>>4; cx <= (Math.max((int)Math.floor(sx),x)>>4); cx++)
             for (int cz = Math.min((int)Math.floor(sz),z)>>4; cz <= (Math.max((int)Math.floor(sz),z)>>4); cz++)
@@ -656,10 +752,24 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return corridorLeg(x,z,wx,wz) || pendingDrops != null && corridorLeg(x,z,pendingDrops[0],pendingDrops[2]);
     }
     private boolean corridorLeg(int x,int z,int wx,int wz) {
+        return corridorLegDistanceSq(x,z,wx,wz) <= 256;
+    }
+    private double corridorLegDistanceSq(int x,int z,int wx,int wz) {
         double dx = wx-plan[0], dz = wz-plan[2], length = dx*dx+dz*dz;
         double t = length == 0 ? 0 : Math.max(0,Math.min(1,((x-plan[0])*dx+(z-plan[2])*dz)/length));
         double ox = x-plan[0]-t*dx, oz = z-plan[2]-t*dz;
-        return ox*ox+oz*oz <= 256;
+        return ox*ox+oz*oz;
+    }
+    /** Lower bound to any corridor entry, not a commitment to the nearest geometric entry.
+     * Every supported entry reached by the search is a candidate, including detours. */
+    private int recoveryHeuristic(int x,int z) {
+        int dx = Math.max(0,Math.max(plan[3]-8-x,x-plan[5]-8));
+        int dz = Math.max(0,Math.max(plan[4]-8-z,z-plan[6]-8));
+        double distance = Math.sqrt((double)dx*dx+(double)dz*dz);
+        int wx = Math.max(plan[3],Math.min(plan[5],plan[0])), wz = Math.max(plan[4],Math.min(plan[6],plan[2]));
+        distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,wx,wz))-16));
+        if (pendingDrops != null) distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,pendingDrops[0],pendingDrops[2]))-16));
+        return (int)Math.floor(10*distance);
     }
     private boolean safeEdge(int[] a,int[] b) {
         if (Math.abs(a[0]-b[0])+Math.abs(a[2]-b[2]) != 1 || Math.abs(a[1]-b[1]) > 1) return false;
@@ -670,9 +780,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 && worldObj.getBlock(low[0],low[1]+2,low[2]).getBlocksMovement(worldObj,low[0],low[1]+2,low[2]);
     }
     private boolean routeIntact(List<int[]> route,int from,int to,int removedX,int removedY,int removedZ) {
+        return routeIntact(route,from,to,removedX,removedY,removedZ,false);
+    }
+    private boolean routeIntact(List<int[]> route,int from,int to,int removedX,int removedY,int removedZ,boolean recovery) {
         for (int i = from; i <= to; i++) {
             int[] p = route.get(i);
-            if (!inCorridor(p[0],p[2]) || !standing(p[0],p[1],p[2],removedX,removedY,removedZ)
+            if (!(recovery ? inRecoveryBounds(p[0],p[1],p[2]) && recoveryStanding(p[0],p[1],p[2])
+                    : inCorridor(p[0],p[2]) && standing(p[0],p[1],p[2],removedX,removedY,removedZ))
                     || i > from && !safeEdge(route.get(i-1),p)) return false;
         }
         return true;
@@ -712,27 +826,43 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     /** Bounded A*: rank every interaction endpoint by actual route cost plus admissible progress.
      * Cardinal edges may climb/descend one block and must be safe in both directions. */
     private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ) {
+        return searchRoute(goals,removedX,removedY,removedZ,false);
+    }
+    private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ,boolean recovery) {
         int sx = (int)Math.floor(posX), sy = (int)Math.floor(boundingBox.minY+.1), sz = (int)Math.floor(posZ);
-        if (!inCorridor(sx,sz) || !standing(sx,sy,sz,removedX,removedY,removedZ)) {
-            navigationReason = "footing"; navigationDetail = "Start outside safe corridor or unsupported: " + sx+","+sy+","+sz; return null;
+        if (sy < 1 || sy+1 >= worldObj.getHeight()) {
+            navigationReason = "footing"; navigationDetail = "Start outside supported world height: " + sy; return null;
+        }
+        if (!worldObj.blockExists(sx,sy-1,sz) || !worldObj.blockExists(sx,sy+1,sz)
+                || recovery && !recoveryCellLoaded(sx,sy,sz)) {
+            navigationReason = "chunk"; navigationDetail = "Start chunk unavailable: " + sx+","+sy+","+sz;
+            status = recovery ? "corridor_recovery" : "chunk"; return null;
+        }
+        if (!(recovery ? recoveryStanding(sx,sy,sz) : standing(sx,sy,sz,removedX,removedY,removedZ))) {
+            navigationReason = !worldObj.isSideSolid(sx,sy-1,sz,net.minecraftforge.common.util.ForgeDirection.UP)
+                    || sx == removedX && sy-1 == removedY && sz == removedZ ? "footing" : "clearance";
+            navigationDetail = "Unsupported or obstructed start: " + sx+","+sy+","+sz; return null;
+        }
+        if (!recovery && !inCorridor(sx,sz)) {
+            navigationReason = "outside"; navigationDetail = "Supported start outside job corridor: " + sx+","+sy+","+sz; return null;
         }
         java.util.Set<Long> endpoints = new java.util.HashSet<Long>();
         for (int[] goal : goals) if (inCorridor(goal[0],goal[2])) endpoints.add(positionKey(goal[0],goal[1],goal[2]));
-        if (endpoints.isEmpty()) { navigationReason = "standing"; navigationDetail = "No valid endpoint inside the station/work corridor"; return null; }
+        if (!recovery && endpoints.isEmpty()) { navigationReason = "standing"; navigationDetail = "No valid endpoint inside the station/work corridor"; return null; }
         java.util.Map<Long,int[]> visited = new java.util.HashMap<Long,int[]>();
         java.util.Map<Long,Long> parents = new java.util.HashMap<Long,Long>();
         java.util.PriorityQueue<int[]> open = new java.util.PriorityQueue<int[]>(64,(a,b) -> {
             int order = Integer.compare(a[4],b[4]); return order != 0 ? order : Integer.compare(b[3],a[3]);
         });
         long start = positionKey(sx,sy,sz);
-        int[] first = new int[] {sx,sy,sz,0,routeHeuristic(sx,sy,sz,goals)};
+        int[] first = new int[] {sx,sy,sz,0,recovery ? recoveryHeuristic(sx,sz) : routeHeuristic(sx,sy,sz,goals)};
         visited.put(start,first); open.add(first);
-        int expanded = 0; boolean unloaded = false;
+        int expanded = 0; boolean unloaded = false, distanceLimited = false;
         while (!open.isEmpty() && expanded < 8192 && visited.size() < 16384) {
             int[] p = open.poll(); long key = positionKey(p[0],p[1],p[2]);
             if (visited.get(key) != p) continue;
             expanded++;
-            if (endpoints.contains(key)) {
+            if (recovery ? inCorridor(p[0],p[2]) : endpoints.contains(key)) {
                 List<int[]> result = new java.util.ArrayList<int[]>();
                 while (true) {
                     int[] node = visited.get(key); result.add(new int[] {node[0],node[1],node[2]});
@@ -745,21 +875,27 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             for (int direction = 0; direction < 4; direction++) for (int stepY = -1; stepY <= 1; stepY++) {
                 int nx = p[0]+(direction == 0 ? 1 : direction == 1 ? -1 : 0);
                 int nz = p[2]+(direction == 2 ? 1 : direction == 3 ? -1 : 0), ny = p[1]+stepY;
-                if (!inCorridor(nx,nz) || ny < 1 || ny+1 >= worldObj.getHeight()) continue;
-                if (!worldObj.blockExists(nx,ny,nz)) { unloaded = true; continue; }
+                if (ny < 1 || ny+1 >= worldObj.getHeight()) continue;
+                if (recovery ? !inRecoveryBounds(nx,ny,nz) : !inCorridor(nx,nz)) {
+                    if (recovery) distanceLimited = true;
+                    continue;
+                }
+                if (!worldObj.blockExists(nx,ny,nz) || recovery && !recoveryCellLoaded(nx,ny,nz)) { unloaded = true; continue; }
                 long next = positionKey(nx,ny,nz); int cost = p[3]+10+4*Math.abs(stepY);
+                if (recovery && cost > RECOVERY_COST) { distanceLimited = true; continue; }
                 int[] old = visited.get(next);
-                if (old != null && old[3] <= cost || !standing(nx,ny,nz,removedX,removedY,removedZ)) continue;
-                int[] node = new int[] {nx,ny,nz,cost,cost+routeHeuristic(nx,ny,nz,goals)};
+                if (old != null && old[3] <= cost || !(recovery ? recoveryStanding(nx,ny,nz) : standing(nx,ny,nz,removedX,removedY,removedZ))) continue;
+                int[] node = new int[] {nx,ny,nz,cost,cost+(recovery ? recoveryHeuristic(nx,nz) : routeHeuristic(nx,ny,nz,goals))};
                 if (!safeEdge(p,node)) continue;
                 if (old == null && visited.size() >= 16384) continue;
                 visited.put(next,node); parents.put(next,key); open.add(node);
             }
         }
-        navigationReason = open.isEmpty() ? "path" : "search_limit";
+        navigationReason = !open.isEmpty() ? "search_limit" : unloaded ? "chunk" : distanceLimited ? "recovery_limit" : "path";
         navigationDetail = "No complete safe route; expanded=" + expanded + " discovered=" + visited.size()
-                + " endpoints=" + endpoints.size() + "; bounded station/work corridor";
-        if (unloaded && open.isEmpty()) { status = "chunk"; navigationReason = ""; }
+                + " endpoints=" + (recovery ? "any supported corridor entry" : endpoints.size())
+                + (recovery ? "; fixed recovery origin=" + Arrays.toString(recoveryOrigin) : "; bounded station/work corridor");
+        if ("chunk".equals(navigationReason)) status = recovery ? "corridor_recovery" : "chunk";
         return null;
     }
     /** Canonical cache order is storage -> current work position. Check only the prefix needed
@@ -799,6 +935,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int[] dest = destination == null ? new int[0] : destination.clone();
         int[] step = waypoint == null ? new int[0] : waypoint.clone();
         String reason = navigationReason.isEmpty() ? "path" : navigationReason;
+        int[] recoveryStart = recoveryOrigin, recoveryEnd = recoveryDestination;
+        int attempts = recoveryAttempts;
         long now = System.nanoTime();
         if (lastNavigationLog == 0 || now-lastNavigationLog >= 60000000000L) {
             lastNavigationLog = now;
@@ -806,9 +944,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     + " task=" + task.key + " storageReason=" + storageReason.key
                     + " cursor=" + cursor + " target=" + targetCursor + " cleanup=" + rampCleanup
                     + " destination=" + Arrays.toString(dest) + " waypoint=" + Arrays.toString(step)
+                    + " recoveryOrigin=" + Arrays.toString(recoveryStart) + " recoveryDestination=" + Arrays.toString(recoveryEnd)
+                    + " recoveryAttempts=" + attempts
                     + " range=" + getNavigator().getPathSearchRange() + " bounds=" + Arrays.toString(plan) + " detail=" + navigationDetail);
         }
         stop("navigation_failed"); navigationReason = reason; destination = dest.length == 3 ? dest : null; waypoint = step.length == 3 ? step : null;
+        recoveryOrigin = recoveryStart; recoveryDestination = recoveryEnd; recoveryAttempts = attempts;
     }
     private void visitChest() {
         if (!worldObj.blockExists(plan[0], plan[1], plan[2])) { status = "chunk"; return; }
@@ -1102,6 +1243,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setBoolean("AccessRamp",accessRamp); tag.setInteger("RampOffset",rampOffset); tag.setInteger("RampCleanup",rampCleanup);
         tag.setString("NavigationReason",navigationReason);
         tag.setString("NavigationDetail",navigationReason.isEmpty() ? "" : navigationDetail);
+        if (recoveryOrigin != null) tag.setIntArray("RecoveryOrigin",recoveryOrigin);
+        if (recoveryDestination != null) tag.setIntArray("RecoveryDestination",recoveryDestination);
+        tag.setInteger("RecoveryAttempts",recoveryAttempts);
         if (destination != null) tag.setIntArray("Destination",destination);
         if (waypoint != null) tag.setIntArray("Waypoint",waypoint);
         tag.setInteger("PickaxesRequested", requestedTools);
