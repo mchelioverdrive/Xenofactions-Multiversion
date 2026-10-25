@@ -1923,7 +1923,6 @@ xf.miner.escape_pillar=Escape pillar: %s to feet Y:%s
 xf.miner.ladder_restock=Ladder restock: carrying %s / required %s
 xf.miner.access_materials=Usable supports: %s; ladders: %s; emergency support reserve: %s
 xf.miner.repair_after_restock=Verify / repair fixed ladder and bottom connection before mining.
-xf.miner.request_single_block=Need a suitable single-block pickaxe. This tool has no verified NPC safety adapter; its item is preserved. Supply a vanilla pickaxe or the supported HBM bismuth pickaxe.
 xf.miner.ladder_notice=%s [%s] needs %s ladders to continue. Assigned station: %s. %s %s
 xf.miner.escape_notice=%s [%s] has enough ladders (missing: %s). Assigned station: %s. %s %s
 xf.miner.waiting_at_station=Waiting at the station for supplies.

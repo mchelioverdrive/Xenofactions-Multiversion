@@ -116,7 +116,6 @@ public final class GUIMinerNPC extends GuiContainer {
             if (state.getInteger("RestockLadders") > 0) detail(lines,I18n.format("xf.miner.ladder_restock",state.getInteger("LaddersCarried"),state.getInteger("RestockLadders")));
             detail(lines,I18n.format("xf.miner.access_materials",state.getInteger("BlocksCarried"),state.getInteger("LaddersCarried"),state.getInteger("EmergencyBlocks")));
             if (state.getBoolean("RepairAfterRestock")) detail(lines,I18n.format("xf.miner.repair_after_restock"));
-            if (state.getBoolean("UnsafeTool")) detail(lines,I18n.format("xf.miner.request_single_block"));
             int[] recoveryStart = state.getIntArray("RecoveryOrigin"), recoveryEnd = state.getIntArray("RecoveryDestination");
             if (recoveryStart.length == 3) {
                 detail(lines,I18n.format("xf.miner.recovery_origin",coord(recoveryStart[0],recoveryStart[1],recoveryStart[2])));

@@ -2762,7 +2762,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!suitable(getHeldItem())) {
             requestedTools = 1;
             if (accessStationReachable && task != Task.ESCAPE) beginStorage(StorageReason.TOOL);
-            else { accessFailure("supplies",p,task == Task.ESCAPE ? "Escape clearance needs a verified single-block pickaxe; station has not been reached"
+            else { accessFailure("supplies",p,task == Task.ESCAPE ? "Escape clearance needs a suitable pickaxe; station has not been reached"
                     : "A suitable pickaxe is needed for staircase clearance; station unreachable"); blockObjective("no_tool"); }
             return;
         }
@@ -3074,7 +3074,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean suitable(ItemStack stack) {
         if (!pickaxe(stack) || stack.isItemStackDamageable() && stack.getItemDamage() >= stack.getMaxDamage()) return false;
-        if (!com.hfr.worker.MinerHarvestDrops.singleBlockTool(stack)) return false;
         if (requiredHarvest < 0) return true;
         if (stack.getItem().getHarvestLevel(stack, "pickaxe") < requiredHarvest) return false;
         int width = plan[5]-plan[3]+1, length = plan[6]-plan[4]+1;
@@ -3275,8 +3274,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         EntityPlayerMP recipient = supplyRecipient();
         if (recipient == null) return;
         // One private message per Miner per minute, including changing requests and reopen/Start spam.
-        ChatComponentTranslation tool = new ChatComponentTranslation(unsafeTool() ? "xf.miner.request_single_block"
-                : requiredHarvest >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick", requiredHarvest);
+        ChatComponentTranslation tool = new ChatComponentTranslation(requiredHarvest >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick", requiredHarvest);
         ChatComponentTranslation light = new ChatComponentTranslation("xf.miner.need_torches", requestedTorches);
         ChatComponentTranslation request = requestedTools > 0 ? tool : light;
         if (requestedTools > 0 && requestedTorches > 0) request = new ChatComponentTranslation("xf.miner.both_requests", tool, light);
@@ -3291,7 +3289,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                         ? "xf.miner.direct_supplies" : "xf.miner.supplies")));
         lastSupplyReminder = now; sentSupplyReminder = true;
     }
-    private boolean unsafeTool() { return pickaxe(getHeldItem()) && !com.hfr.worker.MinerHarvestDrops.singleBlockTool(getHeldItem()); }
     private EntityPlayerMP supplyRecipient() {
         for (Object value : MinecraftServer.getServer().getConfigurationManager().playerEntityList) {
             EntityPlayerMP player = (EntityPlayerMP)value;
@@ -3322,7 +3319,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setInteger("BlocksRequested",requestedBlocks); tag.setInteger("LaddersRequested",requestedLadders);
         tag.setInteger("RestockLadders",restockLadders); tag.setInteger("LaddersCarried",accessCount(true));
         tag.setInteger("BlocksCarried",accessCount(false)); tag.setInteger("EmergencyBlocks",emergencyBlocks());
-        tag.setBoolean("RepairAfterRestock",repairAfterRestock); tag.setBoolean("UnsafeTool",unsafeTool());
+        tag.setBoolean("RepairAfterRestock",repairAfterRestock);
         tag.setInteger("EscapeColumn",escapeColumn);
         if (escapeOrigin != null) tag.setIntArray("EscapeOrigin",escapeOrigin);
         if (escapePillar != null) tag.setIntArray("EscapePillar",escapePillar);
