@@ -870,7 +870,7 @@ public class CommonEventHandler {
 		}
 	}
 	
-	@SubscribeEvent(priority = EventPriority.LOW)
+	@SubscribeEvent(priority = EventPriority.LOW, receiveCanceled = true)
 	public void oreDropEvent(BreakEvent event) {
 		if (com.hfr.worker.MinerHarvestDrops.defer(event)) return;
 		dropStoneRewards(event);

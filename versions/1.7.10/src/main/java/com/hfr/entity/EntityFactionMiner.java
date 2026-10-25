@@ -664,22 +664,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (miningProgress <= 0) { stop("unmineable"); return; }
             if (miningProgress > previousProgress) objectiveTicks = 0;
             if (miningProgress < 1) return;
-            boolean harvested = false;
-            try { harvested = com.hfr.worker.MinerHarvestDrops.harvest(player,x,y,z); }
-            finally {
-                setCurrentItemOrArmor(0, player.inventory.mainInventory[0]); player.inventory.mainInventory[0] = null;
-            }
+            boolean harvested = harvestWithTool(player,x,y,z);
             miningProgress = 0; miningBlock = null;
             if (!harvested) { stop("harvest_denied"); return; }
-            rejectedTargets.clear(); accessAttempts = 0; clearAccessSearch(); clearRouteSearch(); reachedPositions.clear();
-            interactionTarget = selectedEndpoint = plannedEntrance = null; arrivalFailure = "";
             usefulProgress("harvested target");
-            returnRoute.clear(); accessSupplyChecked = false;
-            boolean collected = collectDrops(x, y, z);
-            if (!collected) { pendingDrops = new int[] {x, y, z}; pendingDropsCaptured = true; }
             advance(workCursor);
-            // The safety route was checked with precisely this block absent; do not append travel to it.
-            if (!collected) beginStorage(StorageReason.OVERFLOW);
+            if (!overflowDrops.isEmpty()) beginStorage(StorageReason.OVERFLOW);
             else if (!unfinished()) {
                 if (hasCargo()) beginStorage(StorageReason.COMPLETE);
                 else { transition(Task.COMPLETE,"last block had no carried output",null); stop("complete"); }
@@ -2792,19 +2782,43 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (hardness <= 0) { accessFailure("clearance",p,"Tool cannot harvest staircase clearance"); deferAccessOperation(p); return; }
         miningProgress += hardness; objectiveTicks = 0;
         if (miningProgress < 1) return;
-        boolean harvested = false;
-        try { harvested = com.hfr.worker.MinerHarvestDrops.harvest(player,p[0],p[1],p[2]); }
+        boolean harvested = harvestWithTool(player,p[0],p[1],p[2]);
+        resetMining();
+        if (!harvested || !accessPresent(p)) { accessFailure("clearance",p,"Forge harvesting refused or did not clear the access cell"); deferAccessOperation(p); return; }
+        retainAccess(p);
+        // AOE may have removed an earlier support and rewound the construction index.
+        if (accessIndex < accessPlan.size() && accessPlan.get(accessIndex) == p) accessIndex++;
+        usefulProgress("harvested staircase clearance");
+    }
+    private boolean harvestWithTool(FakePlayer player,int x,int y,int z) {
+        try { return com.hfr.worker.MinerHarvestDrops.harvest(player,x,y,z,factionId,this::finishHarvest); }
         finally {
             setCurrentItemOrArmor(0,player.inventory.mainInventory[0]); player.inventory.mainInventory[0] = null;
         }
-        resetMining();
-        if (harvested) collectDrops(p[0],p[1],p[2]);
-        if (!harvested || !accessPresent(p)) { accessFailure("clearance",p,"Forge harvesting refused or did not clear the access cell"); deferAccessOperation(p); return; }
-        retainAccess(p); accessIndex++;
-        failedAccessOperations.clear();
+    }
+    private void finishHarvest(List<net.minecraftforge.event.world.BlockEvent.BreakEvent> changed) {
+        if (changed.isEmpty()) return;
+        // Collect every affected site's real entities, even after a partial action/exception.
+        // Overlapping pickup volumes skip dead entities; overflow retains each remainder once.
+        boolean collected = true;
+        for (net.minecraftforge.event.world.BlockEvent.BreakEvent event : changed)
+            if (!collectDrops(event.x,event.y,event.z)) collected = false;
+        if (!collected && pendingDrops == null) {
+            net.minecraftforge.event.world.BlockEvent.BreakEvent first = changed.get(0);
+            pendingDrops = new int[] {first.x,first.y,first.z}; pendingDropsCaptured = true;
+        }
+        // The pre-harvest exit proof modeled only the target. Rebuild from actual terrain;
+        // retain the construction objective and fixed ladder column for repair/escape.
+        resetPath(); returnRoute.clear(); clearRouteSearch(); clearAccessSearch();
+        rejectedTargets.clear(); reachedPositions.clear(); failedEndpoints.clear();
+        failedAccessOperations.clear(); constructionRefuge.clear();
+        selectingTarget = false; searchOffset = accessAttempts = returnFailures = 0; returnFailureTarget = -1;
+        interactionTarget = selectedEndpoint = plannedEntrance = null; arrivalFailure = "";
         accessSupplyChecked = false;
-        returnRoute.clear(); clearRouteSearch(); rejectedTargets.clear(); failedEndpoints.clear();
-        usefulProgress("harvested staircase clearance");
+        for (int i = 0; i < accessIndex; i++) if (!accessPresent(accessPlan.get(i))) { accessIndex = i; break; }
+        if (ladderPosition != null && !buildingAccess && task != Task.ESCAPE)
+            for (int[] p : accessBlocks) if (p[3] >= 0 && !accessPresent(p)) { repairAfterRestock = true; break; }
+        usefulProgress("terrain changed by tool harvest");
     }
     private boolean placeAccess(int[] p) {
         if (p[3] < 0) return false;
