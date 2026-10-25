@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import com.hfr.builder.BuilderPlacement;
 import net.minecraft.block.Block;
 import net.minecraft.util.ChunkCoordinates;
@@ -20,14 +21,15 @@ public final class MinerHarvestDrops {
     private final UUID factionId;
     private final MinerHarvestDrops previous;
     private final Consumer<List<BreakEvent>> completed;
+    private final Predicate<BreakEvent> allowed;
     // Keep all attempts and their actual events: later cancellation must remain visible.
     private final Map<ChunkCoordinates,List<BreakEvent>> events = new LinkedHashMap<ChunkCoordinates,List<BreakEvent>>();
 
-    private MinerHarvestDrops(FakePlayer player,UUID factionId,Consumer<List<BreakEvent>> completed) {
-        this.player = player; this.factionId = factionId; this.completed = completed; previous = ACTIVE.get();
+    private MinerHarvestDrops(FakePlayer player,UUID factionId,Predicate<BreakEvent> allowed,Consumer<List<BreakEvent>> completed) {
+        this.player = player; this.factionId = factionId; this.allowed = allowed; this.completed = completed; previous = ACTIVE.get();
     }
-    private static MinerHarvestDrops begin(FakePlayer player,UUID factionId,Consumer<List<BreakEvent>> completed) {
-        MinerHarvestDrops scope = new MinerHarvestDrops(player,factionId,completed);
+    private static MinerHarvestDrops begin(FakePlayer player,UUID factionId,Predicate<BreakEvent> allowed,Consumer<List<BreakEvent>> completed) {
+        MinerHarvestDrops scope = new MinerHarvestDrops(player,factionId,allowed,completed);
         ACTIVE.set(scope);
         return scope;
     }
@@ -41,7 +43,7 @@ public final class MinerHarvestDrops {
         MinerHarvestDrops scope = find((FakePlayer)event.getPlayer());
         if (scope == null || scope.player.worldObj != event.world) return false;
         // Apply worker protections to every affected block, without restricting tool geometry.
-        if (!WorkerAccess.ownsLand(event.world,event.x,event.z,scope.factionId)
+        if (!scope.allowed.test(event) || !WorkerAccess.ownsLand(event.world,event.x,event.z,scope.factionId)
                 || BuilderPlacement.protectedBlock(event.world,event.x,event.y,event.z)
                 || event.block.getBlockHardness(event.world,event.x,event.y,event.z) < 0
                 || event.world.getTileEntity(event.x,event.y,event.z) != null || event.block.getMaterial().isLiquid())
@@ -53,10 +55,13 @@ public final class MinerHarvestDrops {
         return true;
     }
     public static boolean harvest(FakePlayer player,int x,int y,int z,UUID factionId,Consumer<List<BreakEvent>> completed) {
+        return harvest(player,x,y,z,factionId,event -> true,completed);
+    }
+    public static boolean harvest(FakePlayer player,int x,int y,int z,UUID factionId,Predicate<BreakEvent> allowed,Consumer<List<BreakEvent>> completed) {
         // A reentrant call for this actor belongs to the existing action and is finalized once.
         MinerHarvestDrops scope = find(player);
         boolean outermost = scope == null;
-        if (outermost) scope = begin(player,factionId,completed);
+        if (outermost) scope = begin(player,factionId,allowed,completed);
         try {
             player.theItemInWorldManager.tryHarvestBlock(x,y,z);
             // A hook may handle removal itself and return false to stop vanilla harvesting.
