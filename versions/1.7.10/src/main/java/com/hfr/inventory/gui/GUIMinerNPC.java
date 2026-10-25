@@ -103,6 +103,7 @@ public final class GUIMinerNPC extends GuiContainer {
             if (blocks > 0 || ladders > 0) detail(lines,ladders == 0 ? I18n.format("xf.miner.need_blocks",blocks) : I18n.format("xf.miner.need_access",blocks,ladders));
             if ((blocks > 0 || ladders > 0) && state.getBoolean("AccessDirectDelivery")) detail(lines,I18n.format("xf.miner.direct_supplies"));
             if (!state.getString("AccessBlocker").isEmpty()) detail(lines,state.getString("AccessBlocker"));
+            if (!state.getString("AccessPlacementFailure").isEmpty()) detail(lines,state.getString("AccessPlacementFailure"));
             if (state.getBoolean("BuildingAccess") && state.getBoolean("StaircaseAccess") && !state.getString("LadderBlocker").isEmpty())
                 detail(lines,I18n.format("xf.miner.ladder_blocker",state.getString("LadderBlocker")));
             if (!state.getString("NavigationReason").isEmpty()) {
