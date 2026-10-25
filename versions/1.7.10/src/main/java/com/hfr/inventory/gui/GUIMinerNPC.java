@@ -110,6 +110,13 @@ public final class GUIMinerNPC extends GuiContainer {
                 if (state.getBoolean("NavigationBlocked")) detail(lines,I18n.format("xf.miner.blocked_action"));
             }
             if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
+            int[] escape = state.getIntArray("EscapeDestination"), pillar = state.getIntArray("EscapePillar");
+            if (escape.length == 3) detail(lines,I18n.format("xf.miner.escape_destination",coord(escape[0],escape[1],escape[2])));
+            if (pillar.length == 4) detail(lines,I18n.format("xf.miner.escape_pillar",coord(pillar[0],pillar[1],pillar[2]),pillar[3]));
+            if (state.getInteger("RestockLadders") > 0) detail(lines,I18n.format("xf.miner.ladder_restock",state.getInteger("LaddersCarried"),state.getInteger("RestockLadders")));
+            detail(lines,I18n.format("xf.miner.access_materials",state.getInteger("BlocksCarried"),state.getInteger("LaddersCarried"),state.getInteger("EmergencyBlocks")));
+            if (state.getBoolean("RepairAfterRestock")) detail(lines,I18n.format("xf.miner.repair_after_restock"));
+            if (state.getBoolean("UnsafeTool")) detail(lines,I18n.format("xf.miner.request_single_block"));
             int[] recoveryStart = state.getIntArray("RecoveryOrigin"), recoveryEnd = state.getIntArray("RecoveryDestination");
             if (recoveryStart.length == 3) {
                 detail(lines,I18n.format("xf.miner.recovery_origin",coord(recoveryStart[0],recoveryStart[1],recoveryStart[2])));
