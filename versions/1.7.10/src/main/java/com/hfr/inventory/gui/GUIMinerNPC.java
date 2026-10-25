@@ -166,6 +166,8 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
             if (!"none".equals(state.getString("StorageReason")))
                 detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
+            detail(lines,I18n.format("xf.miner.cargo_capacity",state.getString("CargoCapacity")));
+            if (!state.getString("CapacityDetail").isEmpty()) detail(lines,state.getString("CapacityDetail"));
             if (state.getInteger("Overflow") > 0) detail(lines,I18n.format("xf.miner.overflow",state.getInteger("Overflow")));
             int[] c = state.getIntArray("Selection");
             detail(lines,I18n.format("xf.miner.pending")+":");
