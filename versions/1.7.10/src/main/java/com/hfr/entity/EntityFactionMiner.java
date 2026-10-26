@@ -107,6 +107,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private enum Movement { WALK, STEP, DESCEND, CLIMB }
     private enum EdgeFailure { NONE, FOOTING, RISE, DROP, SPAN, LADDER, CLEARANCE, LANDING }
     private int[] preciseGoal, interactionTarget, selectedEndpoint, plannedEntrance;
+    private static final double PRECISE_HORIZONTAL = .01, PRECISE_VERTICAL = .01, LADDER_VERTICAL = .06;
+    private boolean preciseLadder;
+    private int preciseDirection, ladderStallTicks, lastLadderDirection, lastLadderTick;
+    private double preciseHeight, preciseSurfaceHeight;
+    private int[] lastLadderGoal;
+    private boolean lastLadderCompleted = true;
+    private long lastLadderLog;
     private Block interactionBlock;
     private int interactionMeta;
     private boolean interactionMining;
@@ -825,6 +832,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         diagnostic("objective","deferred unfinished target " + failed);
     }
     private void useRoute(List<int[]> found) {
+        getNavigator().clearPathEntity(); preciseGoal = null;
         if (!buildingAccess && ladderPosition == null) {
             // Executable work routes already include an independent storage-exit
             // proof; storage trips end at storage. Retain ladders on either leg.
@@ -832,7 +840,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (ladderPosition == null) retainTravelLadder(returnRoute);
         }
         travelRoute.clear(); travelRoute.addAll(found); routeIndex = segmentEnd = 0;
-        enteringRoute = getDistanceSq(found.get(0)[0]+.5,nodeY(found.get(0)),found.get(0)[2]+.5) > .0125;
+        enteringRoute = !atPreciseNode(found.get(0),ladderNode(found.get(0)));
         selectedEndpoint = found.get(found.size()-1).clone(); plannedEntrance = null;
         for (int i = 1; i < found.size(); i++) if (nodeY(found.get(i)) < nodeY(found.get(i-1))-.01) {
             plannedEntrance = found.get(i).clone(); break;
@@ -972,33 +980,121 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return true;
     }
-    /** PathNavigate cannot advance ladders in 1.7.10. Drive accepted special edges through
-     * the ordinary living collision/step/Forge-ladder physics, on the owning world thread. */
+    private boolean ladderNode(int[] node) { return ladder(node[0],node[1],node[2],-30000001,-1,0); }
+    private boolean atPreciseNode(int[] node,boolean climbing) {
+        double dx = node[0]+.5-posX, dz = node[2]+.5-posZ;
+        return dx*dx+dz*dz <= PRECISE_HORIZONTAL*PRECISE_HORIZONTAL
+                && Math.abs(nodeY(node)-boundingBox.minY) <= (climbing ? LADDER_VERTICAL : PRECISE_VERTICAL);
+    }
+    private void startPreciseMovement(int[] goal,boolean climbing) {
+        if (preciseGoal == goal) return;
+        getNavigator().clearPathEntity();
+        preciseGoal = goal; waypoint = goal.clone();
+        preciseLadder = climbing || isOnLadder() || ladderNode(goal);
+        preciseHeight = preciseSurfaceHeight = nodeY(goal);
+        // Clear the lip before translating onto a higher/equal floor. The small
+        // lift is collision-resolved movement, not an offset arrival requirement.
+        if (preciseLadder && !ladderNode(goal) && preciseHeight >= boundingBox.minY-LADDER_VERTICAL) preciseHeight += .02;
+        preciseDirection = (int)Math.signum(preciseHeight-boundingBox.minY);
+        ladderStallTicks = 0;
+        if (preciseLadder && preciseDirection != 0) {
+            if (!lastLadderCompleted && lastLadderDirection != 0 && preciseDirection != lastLadderDirection
+                    && ticksExisted-lastLadderTick <= 20)
+                ladderDiagnostic("changed_command before completion; previous=" + Arrays.toString(lastLadderGoal)
+                        + " previousDirection=" + lastLadderDirection,0,0,motionY);
+            lastLadderDirection = preciseDirection; lastLadderGoal = goal;
+            lastLadderCompleted = false; lastLadderTick = ticksExisted;
+        }
+    }
+    private void reachedRouteNode(int[] node) {
+        navigationFailures = pathTicks = 0; bestRouteProgress = -Double.MAX_VALUE;
+        if (reachedPositions.size() < 4096 && reachedPositions.add(positionKey(node[0],node[1],node[2]))) {
+            objectiveTicks = 0;
+            if (objectiveFailures > 0) { objectiveFailures = 0; diagnostic("reset","reached new route position"); }
+        }
+    }
+    /** Only consume/issue already planned edges here. Route searches stay in work(). */
+    private void completePreciseMovement() {
+        if (preciseGoal == null || !atPreciseNode(preciseGoal,preciseLadder)
+                || Math.abs(nodeY(preciseGoal)-preciseSurfaceHeight) > .001) return;
+        int[] completed = preciseGoal;
+        boolean climbing = preciseLadder;
+        preciseGoal = null; motionX = motionZ = 0;
+        if (climbing) { motionY = 0; lastLadderCompleted = true; }
+        List<int[]> route = recoveringCorridor ? recoveryRoute : travelRoute;
+        if (route.isEmpty()) return;
+        if (enteringRoute && completed == route.get(0)) {
+            enteringRoute = false; reachedRouteNode(completed);
+        } else if (segmentEnd > routeIndex && completed == route.get(segmentEnd)) {
+            routeIndex = segmentEnd; reachedRouteNode(completed);
+        } else return; // A final interaction approach does not advance another edge.
+        if (routeIndex+1 < route.size() && movement(route.get(routeIndex),route.get(routeIndex+1)) == Movement.CLIMB) {
+            segmentEnd = routeIndex+1;
+            startPreciseMovement(route.get(segmentEnd),true);
+        }
+    }
+    private void ladderDiagnostic(String reason,double requestedY,double movedY,double nativeY) {
+        long now = System.nanoTime();
+        if (lastLadderLog != 0 && now-lastLadderLog < 10000000000L) return;
+        lastLadderLog = now;
+        XFLog.warn(taskDiagnostic("ladder " + reason) + " route=" + routeIndex + "/" + segmentEnd
+                + " precise=" + Arrays.toString(preciseGoal) + " feetY=" + boundingBox.minY
+                + " direction=" + preciseDirection + " requestedY=" + requestedY + " movedY=" + movedY
+                + " nativeMotionY=" + nativeY + " motionY=" + motionY);
+    }
+    @Override protected void updateAITasks() {
+        // Clearing a path alone does not cancel EntityMoveHelper's queued command.
+        // Consume a neutral command before vanilla's helper/jump phase can use it.
+        boolean precise = preciseGoal != null || running && isOnLadder() && getNavigator().noPath();
+        if (precise) {
+            getNavigator().clearPathEntity();
+            getMoveHelper().setMoveTo(posX,Math.floor(boundingBox.minY+.5),posZ,0);
+        }
+        super.updateAITasks();
+        if (precise) { setJumping(false); moveStrafing = moveForward = 0; }
+    }
+    /** Drive accepted special edges through ordinary collision/step resolution. */
     @Override public void moveEntityWithHeading(float strafe,float forward) {
         if (!worldObj.isRemote && running && task == Task.ESCAPE && escapeJumping) {
             motionX = motionZ = 0; super.moveEntityWithHeading(0,0); return;
         }
+        if (!worldObj.isRemote && running) completePreciseMovement();
         if (!worldObj.isRemote && running && preciseGoal != null && segmentChunksLoaded(preciseGoal)) {
             double fy = nodeY(preciseGoal);
-            if (!Double.isNaN(fy)) {
+            if (!Double.isNaN(fy) && Math.abs(fy-preciseSurfaceHeight) <= .001) {
                 double dx = preciseGoal[0]+.5-posX, dz = preciseGoal[2]+.5-posZ;
-                // Finish the last fraction with real collision-resolved motion. An
-                // asymptotic steering factor cannot execute an exactly-on-reach endpoint.
                 double distance = Math.sqrt(dx*dx+dz*dz), scale = distance > .12 ? .12/distance : 1;
                 motionX = dx*scale; motionZ = dz*scale;
-                if (isOnLadder()) {
-                    double dy = fy+(ladder(preciseGoal[0],preciseGoal[1],preciseGoal[2],-30000001,-1,0) ? 0 : .08)-boundingBox.minY;
-                    // A minimum .08 impulse overshoots the last fraction and can
-                    // oscillate forever across a rung's endpoint. Finish exactly.
-                    motionY = Math.copySign(Math.min(Math.abs(dy),Math.max(.08,Math.min(.12,Math.abs(dy)*.4))),dy);
+                if (preciseLadder) {
+                    double remaining = preciseHeight-boundingBox.minY;
+                    // Direction belongs to this segment. Crossing its height never
+                    // creates a command back toward the rung we just passed.
+                    motionY = preciseDirection*remaining > 0
+                            ? preciseDirection*Math.min(Math.abs(remaining),.12) : 0;
+                    if (preciseDirection > 0 && !ladderNode(preciseGoal) && boundingBox.minY < fy)
+                        motionX = motionZ = 0;
                 }
-                super.moveEntityWithHeading(0,0); return;
+                double beforeY = boundingBox.minY, requestedY = motionY;
+                super.moveEntityWithHeading(0,0);
+                if (preciseLadder) {
+                    double movedY = boundingBox.minY-beforeY, nativeY = motionY;
+                    // Vanilla adds gravity, or +.2 on horizontal ladder collision,
+                    // AFTER moveEntity. Neither is the next ladder command.
+                    motionY = 0;
+                    if (Math.abs(requestedY) > .001 && Math.abs(movedY) < .001) ladderStallTicks++;
+                    else ladderStallTicks = 0;
+                    if (preciseDirection*movedY < -.001 || ladderStallTicks >= 20)
+                        ladderDiagnostic("unchanged_command failed to execute",requestedY,movedY,nativeY);
+                    lastLadderTick = ticksExisted;
+                }
+                completePreciseMovement(); return;
             }
             preciseGoal = null;
         }
-        if (!worldObj.isRemote && running && preciseGoal == null && (travelRoute.isEmpty() && recoveryRoute.isEmpty() || "chunk".equals(navigationReason))
-                && getNavigator().noPath() && isOnLadder()) { motionX = motionY = motionZ = 0; }
+        boolean holdingLadder = !worldObj.isRemote && running && preciseGoal == null && getNavigator().noPath() && isOnLadder();
+        if (holdingLadder) { motionX = motionY = motionZ = 0; strafe = forward = 0; }
         super.moveEntityWithHeading(strafe,forward);
+        if (holdingLadder) motionY = 0;
     }
     private boolean atDestination(int x,int y,int z,boolean mining) {
         arrivalFailure = interactionFailure(posX,boundingBox.minY,posZ,x,y,z,mining,true);
@@ -1006,7 +1102,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean atWorkEndpoint(boolean mining) {
         return !mining || selectedEndpoint == null
-                || getDistanceSq(selectedEndpoint[0]+.5,nodeY(selectedEndpoint),selectedEndpoint[2]+.5) <= .0001;
+                || atPreciseNode(selectedEndpoint,ladderNode(selectedEndpoint));
     }
     private String interactionFailure(double px,double py,double pz,int x,int y,int z,boolean mining,boolean actual) {
         if (!inCorridor((int)Math.floor(px),(int)Math.floor(pz))) return "outside";
@@ -1119,7 +1215,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (enteringRoute) {
                 int[] entry = route.get(0);
                 double distance = getDistanceSq(entry[0]+.5,nodeY(entry),entry[2]+.5);
-                if (distance <= .0125 && (onGround || isOnLadder())) {
+                if (atPreciseNode(entry,ladderNode(entry))) {
                     enteringRoute = false; preciseGoal = null; pathTicks = 0; bestRouteProgress = -Double.MAX_VALUE;
                     if (reachedPositions.size() < 4096 && reachedPositions.add(positionKey(entry[0],entry[1],entry[2]))) {
                         objectiveTicks = 0; diagnostic("reset","entered new route position");
@@ -1132,7 +1228,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                         getNavigator().clearPathEntity(); preciseGoal = null; route.clear(); enteringRoute = false;
                         routeRetries++; clearRouteSearch(); routeFailure();
                     } else {
-                        getNavigator().clearPathEntity(); preciseGoal = entry; waypoint = entry.clone();
+                        startPreciseMovement(entry,ladderNode(entry));
                         status = recovery ? "corridor_recovery" : isOnLadder() ? ladderActivity()
                                 : nodeY(entry) < boundingBox.minY-.1 ? "descending" : "final_approach";
                         return false;
@@ -1144,8 +1240,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             int previous = routeIndex;
             for (int i = routeIndex+1; i <= segmentEnd && i < route.size(); i++) {
                 int[] next = route.get(i);
-                double tolerance = movement(route.get(i-1),next) == Movement.CLIMB ? .04 : .36;
-                if (getDistanceSq(next[0]+.5,nodeY(next),next[2]+.5) < tolerance) routeIndex = i;
+                boolean precise = preciseGoal == next || movement(route.get(i-1),next) == Movement.CLIMB;
+                if (precise ? atPreciseNode(next,preciseGoal == next ? preciseLadder : true)
+                        : getDistanceSq(next[0]+.5,nodeY(next),next[2]+.5) < .36) {
+                    routeIndex = i;
+                    // Index and controller must always describe the same segment.
+                    if (preciseGoal != null) {
+                        if (preciseLadder) { motionY = 0; lastLadderCompleted = true; }
+                        preciseGoal = null; motionX = motionZ = 0;
+                    }
+                }
             }
             int[] next = route.get(Math.min(routeIndex+1,route.size()-1));
             if (!recovery) movingStatus = movement(route.get(routeIndex),next) == Movement.CLIMB ? ladderActivity()
@@ -1181,7 +1285,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     failedEndpoints.add(positionKey(selectedEndpoint[0],selectedEndpoint[1],selectedEndpoint[2]));
                 getNavigator().clearPathEntity(); preciseGoal = null; route.clear(); routeRetries++; pathTicks = 0;
                 clearRouteSearch(); routeFailure();
-            } else if (preciseGoal != null && getDistanceSq(preciseGoal[0]+.5,nodeY(preciseGoal),preciseGoal[2]+.5) > .000001) {
+            } else if (preciseGoal != null && !atPreciseNode(preciseGoal,preciseLadder)) {
                 Movement kind = movement(route.get(routeIndex),preciseGoal);
                 status = kind == Movement.CLIMB ? ladderActivity() : kind == Movement.DESCEND ? "descending"
                         : kind == Movement.STEP ? "stepping" : "final_approach"; return false;
@@ -1191,11 +1295,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 atDestination(x,y,z,mining);
                 navigationReason = arrivalFailure; navigationDetail = endpointDiagnostic(arrivalFailure);
                 int[] end = route.get(route.size()-1);
-                if (!recovery && preciseGoal == null && (mining && getDistanceSq(end[0]+.5,nodeY(end),end[2]+.5) > .0001
+                if (!recovery && preciseGoal == null && (mining && !atWorkEndpoint(true)
                         || "reach".equals(arrivalFailure) || "sight".equals(arrivalFailure) || "footing".equals(arrivalFailure))
                         && interactionFailure(end[0]+.5,nodeY(end),end[2]+.5,x,y,z,mining,false).isEmpty()
                         && finalApproachClear(end)) {
-                    preciseGoal = end; status = "final_approach"; return false;
+                    startPreciseMovement(end,ladderNode(end)); status = "final_approach"; return false;
                 }
                 if (!recovery && failedEndpoints.size() < 64) failedEndpoints.add(positionKey(end[0],end[1],end[2]));
                 preciseGoal = null; route.clear(); routeRetries++;
@@ -1225,8 +1329,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (!recovery && routeSearchPending) { status = "searching"; return false; }
                 if (found != null && !found.isEmpty()) {
                     if (recovery) {
+                        getNavigator().clearPathEntity(); preciseGoal = null;
                         route.addAll(found); routeIndex = segmentEnd = 0;
-                        enteringRoute = getDistanceSq(found.get(0)[0]+.5,nodeY(found.get(0)),found.get(0)[2]+.5) > .0125;
+                        enteringRoute = !atPreciseNode(found.get(0),ladderNode(found.get(0)));
                         recoveryDestination = found.get(found.size()-1).clone(); bestRouteProgress = -Double.MAX_VALUE; pathTicks = 0;
                     } else useRoute(found);
                 }
@@ -1245,7 +1350,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         if (enteringRoute && !route.isEmpty()) {
             int[] entry = route.get(0);
-            getNavigator().clearPathEntity(); preciseGoal = entry; waypoint = entry.clone();
+            startPreciseMovement(entry,ladderNode(entry));
             status = recovery ? "corridor_recovery" : nodeY(entry) < boundingBox.minY-.1 ? "descending" : "final_approach";
             return false;
         }
@@ -1257,7 +1362,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int dx = first[0]-from[0], dz = first[2]-from[2];
         Movement kind = movement(from,first);
         if (kind != Movement.WALK || nodeY(first) != first[1] || nodeY(from) != from[1]) {
-            getNavigator().clearPathEntity(); preciseGoal = first; waypoint = first.clone();
+            startPreciseMovement(first,kind == Movement.CLIMB);
             status = kind == Movement.CLIMB ? ladderActivity() : kind == Movement.DESCEND ? "descending" : "stepping";
             return false;
         }
