@@ -104,7 +104,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private final java.util.List<AxisAlignedBB> recoveryCollisions = new java.util.ArrayList<AxisAlignedBB>();
     private final java.util.List<ItemStack> overflowDrops = new java.util.ArrayList<ItemStack>();
     private String capacityDetail = "";
-    private int returnFailureTarget = -1, returnFailures;
     private enum Movement { WALK, STEP, DESCEND, CLIMB }
     private enum EdgeFailure { NONE, FOOTING, RISE, DROP, SPAN, LADDER, CLEARANCE, LANDING }
     private int[] preciseGoal, interactionTarget, selectedEndpoint, plannedEntrance;
@@ -120,6 +119,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     // Required fixed-route geometry, independent of historical staircase/escape edits.
     private final List<int[]> ladderAccess = new java.util.ArrayList<int[]>();
     private int[] ladderLanding;
+    // Mining feet and target survive temporary storage/construction interactions.
+    private int[] workPosition, workPositionTarget;
     private final List<int[]> accessPlan = new java.util.ArrayList<int[]>();
     private int accessIndex, accessAttempts, requestedBlocks, requestedLadders;
     private boolean buildingAccess;
@@ -154,6 +155,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private int routeSearchProposal = -1;
     private List<int[]> routeSearchRemaining;
     private boolean routeSearchPending;
+    private boolean routeExitLimited;
+    private long routeSearchLayout;
+    private double routeSearchX, routeSearchY, routeSearchZ;
+    private long endpointLayout;
+    private final java.util.Map<Long,Integer> endpointAccess = new java.util.HashMap<Long,Integer>();
+    private int[] endpointOrigin;
+    private double endpointX, endpointY, endpointZ;
     private int[] accessSearchTarget;
     private List<List<int[]>> accessProposals;
     private final java.util.Map<List<int[]>,int[]> staircaseLayouts = new java.util.IdentityHashMap<List<int[]>,int[]>();
@@ -161,7 +169,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private int staircaseVariantIndex;
     private int accessColumnIndex, accessBottom, accessTop;
     private final java.util.Set<String> accessLayouts = new java.util.HashSet<String>();
-    private java.util.Set<Long> accessFloor, failedSearchPositions = java.util.Collections.emptySet();
     private boolean accessSearchExhausted;
     private String accessStage = "", accessFailure = "";
     private int occupiedAccessCells;
@@ -306,12 +313,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void clearRequests() { requestedTools = requestedTorches = requestedBlocks = requestedLadders = supplyCheckTicks = 0; }
     private void clearRouteSearch() {
         routeSearchTarget = null; routeSearchRemaining = null; routeSearchPending = false; routeSearchProposal = -1;
+        routeExitLimited = false;
     }
     private void clearAccessSearch() {
         accessProposals = null; accessSearchTarget = null; accessProposalIndex = 0; accessSearchExhausted = false;
         accessStage = accessFailure = ""; occupiedAccessCells = 0; occupiedAccessCell = null;
         accessBlocker = "";
-        accessColumnIndex = 0; accessLayouts.clear(); accessFloor = null; failedSearchPositions = java.util.Collections.emptySet();
+        accessColumnIndex = 0; accessLayouts.clear();
         staircaseLayouts.clear();
         staircaseVariantIndex = 0;
         discoveredLadders.clear(); ladderDiscoveryColumn = 0; ladderDiscoveryComplete = false;
@@ -330,7 +338,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (buildingAccess && !staircaseAccess && task != Task.ESCAPE) reconcileAccessPlan();
         accessRepairPending = true;
         navigationBlocked = selectingTarget = false; rejectedTargets.clear(); searchOffset = 0;
-        failedEndpoints.clear(); accessAttempts = returnFailures = 0; returnFailureTarget = -1;
+        failedEndpoints.clear(); accessAttempts = 0;
         interactionTarget = selectedEndpoint = plannedEntrance = null;
         clearRouteSearch(); clearAccessSearch(); resetPath(); reachedPositions.clear();
         failedAccessOperations.clear();
@@ -362,6 +370,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             boolean loaded = worldObj.blockExists(x,y,z);
             watchedTerrain.put(key,new int[] {x,y,z,loaded ? Block.getIdFromBlock(worldObj.getBlock(x,y,z)) : -1,
                     loaded ? worldObj.getBlockMetadata(x,y,z) : 0});
+            // Active endpoint validation also iterates this map between searches.
+            terrainChecks = null;
         }
     }
     private void blockObjective(String state) {
@@ -404,6 +414,32 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return true;
     }
+    private void refreshEndpointContext() {
+        int[] origin = {(int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.001),(int)Math.floor(posZ)};
+        boolean layoutChanged = endpointAccess.size() != proposedAccess.size();
+        if (!layoutChanged) for (int[] p : proposedAccess.values()) {
+            Integer kind = endpointAccess.get(positionKey(p[0],p[1],p[2]));
+            if (kind == null || kind.intValue() != p[3]) { layoutChanged = true; break; }
+        }
+        boolean changed = !Arrays.equals(endpointOrigin,origin) || layoutChanged
+                || endpointX != posX || endpointY != boundingBox.minY || endpointZ != posZ;
+        if (!changed && (!failedEndpoints.isEmpty() || routeSearchRemaining != null)) {
+            if (terrainChecks == null || !terrainChecks.hasNext()) terrainChecks = watchedTerrain.values().iterator();
+            for (int checked = 0; checked < 512 && terrainChecks.hasNext(); checked++) {
+                int[] p = terrainChecks.next(); boolean loaded = worldObj.blockExists(p[0],p[1],p[2]);
+                if ((loaded ? Block.getIdFromBlock(worldObj.getBlock(p[0],p[1],p[2])) : -1) != p[3]
+                        || loaded && worldObj.getBlockMetadata(p[0],p[1],p[2]) != p[4]) { changed = true; break; }
+            }
+        }
+        if (changed) {
+            failedEndpoints.clear(); clearRouteSearch();
+            endpointOrigin = origin; endpointLayout++;
+            endpointAccess.clear();
+            for (int[] p : proposedAccess.values()) endpointAccess.put(positionKey(p[0],p[1],p[2]),p[3]);
+            endpointX = posX; endpointY = boundingBox.minY; endpointZ = posZ;
+            watchedTerrain.clear(); terrainChecks = null;
+        }
+    }
     private String validate(int[] next, boolean area) {
         if (!stationAssigned) return "xf.miner.no_chest";
         if (jobDimension != dimension) return "xf.miner.state.dimension";
@@ -441,6 +477,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void configure(int[] next) {
         pause(); plan = next; cursor = 0; configured = true; task = Task.TO_WORK; storageReason = StorageReason.NONE;
         targetCursor = -1; searchOffset = 0;
+        workPosition = workPositionTarget = null;
         rejectedTargets.clear(); returnRoute.clear();
         accessPlan.clear(); accessBlocks.clear(); ladderAccess.clear(); ladderLanding = null;
         buildingAccess = false; accessDestination = null; accessAttempts = 0;
@@ -534,7 +571,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             navigationReason = "chunk"; pathTicks = 0;
         }
         if (!worldObj.isRemote && !recoveringCorridor && !getNavigator().noPath() && destination != null
-                && atDestination(destination[0],destination[1],destination[2],interactionMining))
+                && atWorkEndpoint(interactionMining) && atDestination(destination[0],destination[1],destination[2],interactionMining))
             arrived();
         super.onLivingUpdate();
         if (worldObj.isRemote || !running) return;
@@ -694,15 +731,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             }
             if (!ensureReturnRoute(x,y,z)) {
                 if ("chunk".equals(status)) return;
-                if (planAccess(x,y+1,z)) return;
-                if (returnFailureTarget != workCursor) { returnFailureTarget = workCursor; returnFailures = 0; }
-                routeFailure();
-                if (++returnFailures < 3) { status = "recovering"; return; }
-                if (cleanup) terminalNavigation();
-                else deferTarget(workCursor);
+                // Re-select an executable endpoint before reconsidering the target
+                // or its fixed ladder. Never mine from footing lost by removal.
+                failedEndpoints.add(positionKey((int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.001),(int)Math.floor(posZ)));
+                if (selectedEndpoint != null) failedEndpoints.add(positionKey(selectedEndpoint[0],selectedEndpoint[1],selectedEndpoint[2]));
+                selectedEndpoint = null; resetPath(); clearRouteSearch();
+                status = "recovering";
                 return;
             }
-            returnFailures = 0; returnFailureTarget = -1;
             FakePlayer player = actor();
             player.setPosition(posX, posY, posZ); player.onGround = onGround;
             player.inventory.mainInventory[0] = getHeldItem(); player.inventory.currentItem = 0;
@@ -968,6 +1004,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         arrivalFailure = interactionFailure(posX,boundingBox.minY,posZ,x,y,z,mining,true);
         return arrivalFailure.isEmpty();
     }
+    private boolean atWorkEndpoint(boolean mining) {
+        return !mining || selectedEndpoint == null
+                || getDistanceSq(selectedEndpoint[0]+.5,nodeY(selectedEndpoint),selectedEndpoint[2]+.5) <= .0001;
+    }
     private String interactionFailure(double px,double py,double pz,int x,int y,int z,boolean mining,boolean actual) {
         if (!inCorridor((int)Math.floor(px),(int)Math.floor(pz))) return "outside";
         if (!worldObj.blockExists(x,mining ? y-1 : y,z)) return "chunk";
@@ -998,6 +1038,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return "";
     }
     private void rememberInteraction(int x,int y,int z,boolean mining) {
+        if (accessProposals == null) refreshEndpointContext();
         Block block = mining ? worldObj.getBlock(x,y-1,z) : worldObj.getBlock(x,y,z);
         int meta = worldObj.getBlockMetadata(x,mining ? y-1 : y,z);
         if (!Arrays.equals(interactionTarget,new int[] {x,y,z}) || interactionMining != mining || interactionBlock != block || interactionMeta != meta) {
@@ -1043,7 +1084,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!recovery) {
             if (!Arrays.equals(destination,goal)) { resetPath(); destination = goal; }
             rememberInteraction(x,y,z,mining);
-            if (atDestination(x,y,z,mining) && (!constructionTarget(x,y,z)
+            // Execute the endpoint whose post-harvest footing/exit was approved.
+            // Merely entering reach of the target must not cancel the descent.
+            if (atWorkEndpoint(mining) && atDestination(x,y,z,mining) && (!mining && !constructionTarget(x,y,z)
                     || !failedEndpoints.contains(positionKey((int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.001),(int)Math.floor(posZ))))) {
                 if (!constructionTarget(x,y,z) || constructionSafe(null,accessPlan.get(accessIndex))) {
                     arrived(); return true;
@@ -1148,7 +1191,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 atDestination(x,y,z,mining);
                 navigationReason = arrivalFailure; navigationDetail = endpointDiagnostic(arrivalFailure);
                 int[] end = route.get(route.size()-1);
-                if (!recovery && preciseGoal == null && ("reach".equals(arrivalFailure) || "sight".equals(arrivalFailure) || "footing".equals(arrivalFailure))
+                if (!recovery && preciseGoal == null && (mining && getDistanceSq(end[0]+.5,nodeY(end),end[2]+.5) > .0001
+                        || "reach".equals(arrivalFailure) || "sight".equals(arrivalFailure) || "footing".equals(arrivalFailure))
                         && interactionFailure(end[0]+.5,nodeY(end),end[2]+.5,x,y,z,mining,false).isEmpty()
                         && finalApproachClear(end)) {
                     preciseGoal = end; status = "final_approach"; return false;
@@ -1256,17 +1300,48 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return true;
     }
     private List<int[]> standingCandidates(int x,int y,int z,boolean mining) {
+        return standingCandidates(x,y,z,mining,true);
+    }
+    private List<int[]> standingCandidates(int x,int y,int z,boolean mining,boolean filterFailures) {
         List<int[]> result = new java.util.ArrayList<int[]>();
         for (int dx = -3; dx <= 3; dx++) for (int dz = -3; dz <= 3; dz++) for (int dy = -3; dy <= 3; dy++) {
             if (dx*dx+dz*dz > 9) continue;
             int sx = x+dx, sy = y+dy, sz = z+dz;
-            if (failedEndpoints.contains(positionKey(sx,sy,sz)) && Arrays.equals(interactionTarget,new int[] {x,y,z})) continue;
+            if (filterFailures && failedEndpoints.contains(positionKey(sx,sy,sz)) && Arrays.equals(interactionTarget,new int[] {x,y,z})) continue;
             double fy = feet(sx,sy,sz,mining ? x : -30000001,mining ? y-1 : -1,z);
             if (Double.isNaN(fy) || !interactionFailure(sx+.5,fy,sz+.5,x,y,z,mining,false).isEmpty()) continue;
+            // A different floor exposed by removal is not the position we can
+            // occupy before harvesting. Choose another supported endpoint.
+            double before = mining ? feet(sx,sy,sz,-30000001,-1,0) : fy;
+            if (Double.isNaN(before) || Math.abs(fy-before) > .06) continue;
             result.add(new int[] {sx,sy,sz});
         }
         java.util.Collections.sort(result,(a,b) -> Double.compare(getDistanceSq(a[0]+.5,a[1],a[2]+.5),getDistanceSq(b[0]+.5,b[1],b[2]+.5)));
         return result;
+    }
+    private List<int[]> workPositions() {
+        int[] goal = accessSearchTarget != null ? accessSearchTarget
+                : buildingAccess && accessDestination != null ? accessDestination : workDestination();
+        if ((pendingDrops != null || workDestination() == null) && workPositionTarget != null) goal = workPositionTarget;
+        if (goal == null) return java.util.Collections.emptyList();
+        final int[] retainedGoal = goal;
+        // Discover actual terrain, never a proposed platform or a surface origin.
+        java.util.Map<Long,int[]> overlay = new java.util.HashMap<Long,int[]>(proposedAccess);
+        proposedAccess.clear();
+        List<int[]> positions;
+        try { positions = standingCandidates(goal[0],goal[1],goal[2],true,false); }
+        finally { proposedAccess.putAll(overlay); }
+        java.util.Collections.sort(positions,(a,b) -> {
+            int height = Integer.compare(Math.abs(a[1]-(retainedGoal[1]-1)),Math.abs(b[1]-(retainedGoal[1]-1)));
+            return height != 0 ? height : Double.compare(getEndpointDistance(a,retainedGoal),getEndpointDistance(b,retainedGoal));
+        });
+        if (Arrays.equals(workPositionTarget,goal) && workPosition != null)
+            for (int i = 0; i < positions.size(); i++) if (Arrays.equals(positions.get(i),workPosition)) {
+                positions.add(0,positions.remove(i)); break;
+            }
+        workPositionTarget = goal.clone();
+        workPosition = positions.isEmpty() ? null : positions.get(0).clone();
+        return positions;
     }
     private boolean standing(int x,int y,int z,int removedX,int removedY,int removedZ) {
         return !Double.isNaN(feet(x,y,z,removedX,removedY,removedZ));
@@ -1529,7 +1604,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return searchRoute(goals,removedX,removedY,removedZ,recovery,startPosition,recovery);
     }
     private List<int[]> searchRoute(List<int[]> goals,int removedX,int removedY,int removedZ,boolean recovery,int[] startPosition,boolean reversible) {
-        failedSearchPositions = java.util.Collections.emptySet();
         searchHeights = new java.util.HashMap<Long,Double>();
         searchRemovedX = removedX; searchRemovedY = removedY; searchRemovedZ = removedZ;
         try { return expandRoute(goals,removedX,removedY,removedZ,recovery,startPosition,reversible); }
@@ -1649,9 +1723,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             java.util.Collections.reverse(result); return result;
         }
         navigationReason = !open.isEmpty() ? "search_limit" : unloaded ? "chunk" : distanceLimited ? "recovery_limit" : "path";
-        // An exhausted directed component cannot reach these exits from any of
-        // its members. Reuse that proof for other work endpoints in this layout.
-        if (open.isEmpty() && !unloaded && !distanceLimited) failedSearchPositions = visited.keySet();
         navigationDetail = "No complete safe route; expanded=" + expanded + " discovered=" + visited.size()
                 + " endpoints=" + (recovery ? "any supported corridor entry" : endpoints.size())
                 + "; phase=" + accessStage + " proposal=" + (accessProposalIndex+1)
@@ -1667,22 +1738,36 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return Math.sqrt((double)(p[0]-target[0])*(p[0]-target[0])+dy*dy+(double)(p[2]-target[2])*(p[2]-target[2]));
     }
     private List<int[]> executableRoute(List<int[]> goals,int x,int y,int z,boolean mining) {
+        refreshEndpointContext();
         int rx = mining ? x : -30000001, ry = mining ? y-1 : -1;
         boolean construction = constructionTarget(x,y,z);
         if (!mining && !construction && (pendingDrops == null || storageTask())) return searchRoute(goals,-30000001,-1,0);
         int proposal = accessProposals == null ? -1 : accessProposalIndex;
-        if (!Arrays.equals(routeSearchTarget,new int[] {x,y,z}) || routeSearchProposal != proposal) {
+        long layout = endpointLayout;
+        if (!Arrays.equals(routeSearchTarget,new int[] {x,y,z}) || routeSearchProposal != proposal
+                || routeSearchLayout != layout || routeSearchX != posX || routeSearchY != boundingBox.minY || routeSearchZ != posZ) {
             routeSearchTarget = new int[] {x,y,z}; routeSearchProposal = proposal;
             routeSearchRemaining = new java.util.ArrayList<int[]>(goals);
+            routeSearchLayout = layout; routeSearchX = posX; routeSearchY = boundingBox.minY; routeSearchZ = posZ;
+            routeExitLimited = false;
         }
         routeSearchPending = false;
         // Three endpoint checks are a per-update budget, never an eligibility cutoff.
         for (int attempt = 0; attempt < 3 && !routeSearchRemaining.isEmpty(); attempt++) {
             // Travel happens before harvesting: never walk through hypothetical air.
-            List<int[]> found = searchRoute(routeSearchRemaining,-30000001,-1,0,false,null,construction);
+            boolean descending = !construction && mining && ladderLanding != null && boundingBox.minY >= ladderLanding[1]-.1;
+            List<int[]> found = descending ? fixedLadderTravel(routeSearchRemaining,null,-30000001,-1,0,true) : null;
+            String descentFailure = descending && found == null ? navigationDetail : "";
+            boolean descentLimited = !descentFailure.isEmpty() && ("search_limit".equals(navigationReason) || "detour_limit".equals(navigationReason));
+            if (found == null) found = searchRoute(routeSearchRemaining,-30000001,-1,0,false,null,construction);
             if (found == null && !construction) found = cachedTravel(routeSearchRemaining,-30000001,-1,0);
             if (found == null) {
+                if (!descentFailure.isEmpty()) {
+                    navigationDetail += "; fixed descent: " + descentFailure;
+                    if (descentLimited && !"chunk".equals(navigationReason)) navigationReason = "search_limit";
+                }
                 if (construction) accessFailure("approach",accessPlan.get(accessIndex),navigationDetail);
+                else navigationDetail = "Work approach failed; target=" + x+","+(y-1)+","+z + "; " + navigationDetail;
                 if ("chunk".equals(navigationReason)) { clearRouteSearch(); return null; }
                 routeSearchRemaining.clear(); return null;
             }
@@ -1696,20 +1781,21 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             // Check the exit from the chosen work position before any descent. The exit
             // search is independent: it need not retrace the entrance or reuse a stale cache.
             if (accessProposals != null) accessStage = "work_exit";
-            List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
-            List<int[]> exit = exits.isEmpty() ? null : searchRoute(exits,rx,ry,z,false,end);
+            List<int[]> exit = stationRoute(end,rx,ry,z);
             if (exit != null) {
+                if (mining) { workPosition = end.clone(); workPositionTarget = new int[] {x,y,z}; }
+                if (accessProposals == null) clearAccessSearch();
                 java.util.Collections.reverse(exit); returnRoute.clear(); returnRoute.addAll(exit); clearRouteSearch(); return found;
             }
-            navigationDetail = "Storage exit failed from endpoint=" + Arrays.toString(end) + "; "
-                    + (exits.isEmpty() ? "No storage interaction positions" : navigationDetail);
-            if (!failedSearchPositions.isEmpty()) routeSearchRemaining.removeIf(p -> failedSearchPositions.contains(positionKey(p[0],p[1],p[2])));
+            routeExitLimited |= "search_limit".equals(navigationReason) || "detour_limit".equals(navigationReason);
+            navigationDetail = "Post-harvest exit failed; removed=" + x+","+(y-1)+","+z
+                    + "; work=" + Arrays.toString(end) + "; " + navigationDetail;
             routeSearchRemaining.removeIf(p -> Arrays.equals(p,end));
         }
         if (!routeSearchRemaining.isEmpty()) { routeSearchPending = true; return null; }
         if (construction) status = "route_failed";
         if (!construction) {
-            navigationReason = "return_blocked";
+            navigationReason = routeExitLimited ? "return_limit" : "return_blocked";
             navigationDetail = "No verified storage exit from any reachable interaction endpoint; target=" + x+","+y+","+z + "; " + navigationDetail;
         }
         return null;
@@ -1775,11 +1861,58 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return true;
     }
     private List<int[]> stationRoute(int[] start) {
+        return stationRoute(start,-30000001,-1,0);
+    }
+    private List<int[]> stationRoute(int[] start,int rx,int ry,int rz) {
         List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
         if (exits.isEmpty()) {
             navigationReason = "standing"; navigationDetail = "No storage endpoint near " + plan[0]+","+plan[1]+","+plan[2]; return null;
         }
-        return searchRoute(exits,-30000001,-1,0,false,start);
+        boolean below = ladderLanding != null && (start == null ? boundingBox.minY : start[1]) < ladderLanding[1]-.1;
+        List<int[]> fixed = below ? fixedLadderTravel(exits,start,rx,ry,rz,false) : null;
+        if (fixed != null) return fixed;
+        String fixedFailure = below ? navigationDetail : "";
+        boolean fixedLimited = below && ("search_limit".equals(navigationReason) || "detour_limit".equals(navigationReason));
+        List<int[]> route = searchRoute(exits,rx,ry,rz,false,start);
+        if (route == null && !fixedFailure.isEmpty()) {
+            navigationDetail += "; fixed ladder: " + fixedFailure;
+            if (fixedLimited && !"chunk".equals(navigationReason)) navigationReason = "search_limit";
+        }
+        return route;
+    }
+    /** Use the committed column as waypoints, with the same edge rules as A*.
+     * This is a route proof only; it never changes the live interaction/task. */
+    private List<int[]> fixedLadderTravel(List<int[]> goals,int[] start,int rx,int ry,int rz,boolean descending) {
+        if (ladderPosition == null || ladderLanding == null) return null;
+        int bottom = Integer.MAX_VALUE, top = Integer.MIN_VALUE;
+        for (int[] p : ladderAccess) if (p[3] > 0 && fixedRung(p)) { bottom = Math.min(bottom,p[1]); top = Math.max(top,p[1]); }
+        if (bottom == Integer.MAX_VALUE) return null;
+        List<int[]> column = new java.util.ArrayList<int[]>();
+        for (int y = bottom; y <= top; y++) column.add(new int[] {ladderPosition[0],y,ladderPosition[1]});
+        column.add(ladderLanding.clone());
+        if (descending) java.util.Collections.reverse(column);
+        for (int i = 0; i < column.size(); i++) {
+            int[] p = column.get(i), from = column.get(Math.max(0,i-1));
+            EdgeFailure rule = i == 0 ? standing(p[0],p[1],p[2],rx,ry,rz) ? EdgeFailure.NONE : EdgeFailure.FOOTING
+                    : edgeFailure(from,p,rx,ry,rz);
+            if (rule != EdgeFailure.NONE) {
+                navigationReason = "path";
+                navigationDetail = (i == 1 && descending || i == column.size()-1 && !descending ? "Upper landing/ladder" : "Ladder column")
+                        + "; rejected=" + Arrays.toString(from) + " -> " + Arrays.toString(p) + " rule=" + rule;
+                return null;
+            }
+        }
+        List<int[]> route = searchRoute(java.util.Collections.singletonList(column.get(0)),rx,ry,rz,false,start);
+        if (route == null) {
+            navigationDetail = (descending ? "Upper landing approach" : "Work floor to ladder") + "; " + navigationDetail; return null;
+        }
+        for (int i = 1; i < column.size(); i++) route.add(column.get(i));
+        List<int[]> tail = searchRoute(goals,rx,ry,rz,false,column.get(column.size()-1));
+        if (tail == null) {
+            navigationDetail = (descending ? "Ladder bottom to mining position" : "Upper landing to station") + "; " + navigationDetail; return null;
+        }
+        for (int i = 1; i < tail.size(); i++) route.add(tail.get(i));
+        return route;
     }
     private void checkAccessStation() {
         accessStationReachable = stationRoute(null) != null;
@@ -2164,11 +2297,6 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             accessProposalIndex = accessColumnIndex = 0; accessLayouts.clear();
             accessSearchTarget = new int[] {x,y,z}; clearRouteSearch();
             getNavigator().clearPathEntity(); preciseGoal = null; travelRoute.clear(); waypoint = null;
-            // One actual reversible floor search supplies the entry component for
-            // every proposal. Hypothetical rungs never make a floating band reachable.
-            List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
-            searchRoute(exits,-30000001,-1,0,false,null,true);
-            accessFloor = failedSearchPositions.isEmpty() ? null : new java.util.HashSet<Long>(failedSearchPositions);
         }
         int existingColumns = discoveredLadders.size();
         int columns = ladderPosition != null ? 1 : existingColumns
@@ -2460,14 +2588,31 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         for (int[] p : cells) if (p[3] > 0) bottom = Math.min(bottom,p[1]);
         List<int[]> rungs = new java.util.ArrayList<int[]>();
         for (int[] p : cells) if (p[3] > 0 && p[1] <= bottom+1) rungs.add(Arrays.copyOf(p,3));
-        return !rungs.isEmpty() && searchRoute(rungs,-30000001,-1,0,false,null,true) != null;
+        List<int[]> positions = workPositions();
+        if (positions.isEmpty()) {
+            navigationReason = "standing";
+            navigationDetail = "Work-floor entry has no supported mining position near retained target=" + Arrays.toString(workPositionTarget);
+            return false;
+        }
+        int[] goal = workPositionTarget;
+        for (int[] rung : rungs) {
+            // Both directions must join the real exposed floor, even when the
+            // Miner is at storage. Model removal without changing the approach.
+            List<int[]> route = searchRoute(positions,goal[0],goal[1]-1,goal[2],false,rung,true);
+            if (route != null) { workPosition = route.get(route.size()-1).clone(); return true; }
+        }
+        navigationDetail = "Ladder bottom/work-floor connection; work=" + Arrays.toString(workPosition)
+                + "; removed=" + goal[0]+","+(goal[1]-1)+","+goal[2] + "; " + navigationDetail;
+        return false;
     }
     /** A missing bottom landing can need blocks even after all rungs arrive.
      * Try short, supplied connecting landings at the exposed work floor; retain only
      * a proposal that physically joins that floor, the fixed column and storage. */
     private boolean connectLadderFloor(List<int[]> cells) {
         if (ladderPosition == null) return false;
-        int floor = repairingLadder || accessSearchTarget == null ? (int)Math.floor(boundingBox.minY+.001) : accessSearchTarget[1];
+        if (workPositions().isEmpty()) return false;
+        int floor = workPosition[1];
+        int[] floorStart = workPosition.clone();
         for (int span = 1; span <= 5; span++) for (int dx = -span; dx <= span; dx++) for (int sign : new int[] {-1,1}) {
             int dz = sign*(span-Math.abs(dx));
             if (sign == 1 && dz == 0) continue;
@@ -2476,7 +2621,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             java.util.Map<Long,int[]> saved = new java.util.HashMap<Long,int[]>(proposedAccess);
             proposedAccess.clear();
             boolean anchor;
-            try { anchor = standing(ax,floor,az,-30000001,-1,0); }
+            try {
+                anchor = standing(ax,floor,az,-30000001,-1,0)
+                        && searchRoute(java.util.Collections.singletonList(new int[] {ax,floor,az}),
+                                workPositionTarget[0],workPositionTarget[1]-1,workPositionTarget[2],false,floorStart,true) != null;
+            }
             finally { proposedAccess.putAll(saved); }
             if (!anchor) continue;
             for (int order = 0; order < 2; order++) {
@@ -2489,6 +2638,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     for (int distance = 0; valid && distance <= span; distance++) {
                         for (int h = -1; valid && h <= 1; h++) {
                             int[] p = {x,floor+h,z,h < 0 ? 0 : -1};
+                            if (p[0] == workPositionTarget[0] && p[1] == workPositionTarget[1]-1 && p[2] == workPositionTarget[2]) {
+                                valid = false; break;
+                            }
                             // Reserve the entire shaft, including tomorrow's lower rungs.
                             if (h < 0 && x == ladderPosition[0] && z == ladderPosition[1]) continue;
                             if (p[3] == 0 && ladderPassage(p) || p[3] < 0 && fixedBacking(p)) { valid = false; break; }
@@ -2533,10 +2685,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return false;
     }
     private boolean actualFloorConnection(int[] p) {
-        if (accessFloor != null) return accessFloor.contains(positionKey(p[0],p[1],p[2]));
         java.util.Map<Long,int[]> overlay = new java.util.HashMap<Long,int[]>(proposedAccess);
         proposedAccess.clear();
-        try { return searchRoute(java.util.Collections.singletonList(p),-30000001,-1,0,false,null,true) != null; }
+        try {
+            List<int[]> positions = workPositions();
+            return !positions.isEmpty() && searchRoute(positions,workPositionTarget[0],workPositionTarget[1]-1,
+                    workPositionTarget[2],false,p,true) != null;
+        }
         finally { proposedAccess.putAll(overlay); }
     }
     private double accessEstimate(List<int[]> proposal) {
@@ -2628,8 +2783,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int bottom = Integer.MAX_VALUE;
         for (int[] p : cells) if (p[3] > 0 && fixedRung(p)) bottom = Math.min(bottom,p[1]);
         if (bottom == Integer.MAX_VALUE) return;
+        if (workPositions().isEmpty()) return;
         List<int[]> route = searchRoute(java.util.Collections.singletonList(new int[] {ladderPosition[0],bottom,ladderPosition[1]}),
-                -30000001,-1,0,false,null,true);
+                workPositionTarget[0],workPositionTarget[1]-1,workPositionTarget[2],false,workPosition,true);
         if (route == null) return;
         for (int[] node : route) if (node[1] <= bottom+1
                 && Math.abs(node[0]-ladderPosition[0])+Math.abs(node[2]-ladderPosition[1]) <= 5
@@ -2656,9 +2812,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             bottom = Math.min(bottom,p[1]); top = Math.max(top,p[1]);
         }
         if (top == Integer.MIN_VALUE) return;
-        // Extension is distinct from damage: only the current exposed feet level
-        // extends the column downward. Do not excavate hypothetical deeper floors.
-        bottom = Math.max(plan[8],Math.min(bottom,(int)Math.floor(boundingBox.minY+.001)));
+        // Storage/repair travel does not move the underground work floor. Extend
+        // only to actual supported terrain near the retained unfinished target.
+        if (!workPositions().isEmpty()) bottom = Math.max(plan[8],Math.min(bottom,workPosition[1]));
         net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(ladderPosition[2]);
         for (int y = bottom; y <= top; y++) {
             requireLadderCell(new int[] {ladderPosition[0],y,ladderPosition[1],ladderPosition[2]});
@@ -2690,8 +2846,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (!repairable || !recordedFooting && (!standing(landing[0],landing[1],landing[2],-30000001,-1,0)
                         || Math.abs(nodeY(landing)-landing[1]) > .001)) continue;
                 try {
+                    for (int[] p : ladderAccess) proposedAccess.put(positionKey(p[0],p[1],p[2]),p);
                     for (int[] p : historical) proposedAccess.put(positionKey(p[0],p[1],p[2]),p);
-                    if (!standing(landing[0],landing[1],landing[2],-30000001,-1,0) || stationRoute(landing) == null) continue;
+                    int[] upperRung = {ladderPosition[0],top,ladderPosition[1]};
+                    if (!safeEdge(upperRung,landing,-30000001,-1,0) || !safeEdge(landing,upperRung,-30000001,-1,0)
+                            || stationRoute(landing) == null) continue;
                     ladderLanding = landing;
                 } finally { proposedAccess.clear(); }
                 break;
@@ -2877,7 +3036,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     /** Geometry proof only; actual traversal is checked during useful travel. */
     private boolean ladderRouteAvailable() {
         return ladderPosition != null && ladderLanding != null && ladderFloorRoute(ladderAccess)
-                && stationRoute(ladderLanding) != null && stationRoute(null) != null;
+                && fixedLadderTravel(standingCandidates(plan[0],plan[1],plan[2],false),workPosition,
+                        workPositionTarget[0],workPositionTarget[1]-1,workPositionTarget[2],false) != null;
     }
     private boolean plannedClearance(int[] cell) {
         for (int[] p : accessPlan) if (p[3] < 0 && p[0] == cell[0] && p[1] == cell[1] && p[2] == cell[2]) return true;
@@ -3190,7 +3350,17 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 blockObjective("no_access"); return;
             }
             if (!ladderRouteAvailable()) {
-                accessFailure("verify_access",ladderLanding,"Repaired geometry has no complete floor/ladder/station route: " + navigationDetail);
+                boolean extended;
+                try {
+                    for (int[] p : ladderAccess) proposedAccess.put(positionKey(p[0],p[1],p[2]),p);
+                    extended = connectLadderFloor(accessPlan);
+                } finally { proposedAccess.clear(); }
+                if (extended) {
+                    requireLadderCells(accessPlan); reconcileAccessPlan();
+                    resetPath(); clearRouteSearch(); failedAccessOperations.clear(); return;
+                }
+                navigationReason = "search_limit".equals(navigationReason) ? "return_limit" : "return_blocked";
+                accessFailure("verify_access",workPosition,"Repaired geometry has no complete work-floor/ladder/station route: " + navigationDetail);
                 blockObjective("no_access"); return;
             }
         }
@@ -3202,6 +3372,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         clearAccessSearch(); clearRouteSearch();
         failedEndpoints.clear(); accessAttempts = 0; returnRoute.clear();
         navigationReason = navigationDetail = arrivalFailure = "";
+        ladderObstruction = accessBlocker = accessPlacementFailure = "";
         if (!resumeStorageTrip()) returnToWork("supplied access completed");
     }
     private void clearAccessCell(int[] p) {
@@ -3303,7 +3474,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         resetPath(); returnRoute.clear(); clearRouteSearch(); clearAccessSearch();
         rejectedTargets.clear(); reachedPositions.clear(); failedEndpoints.clear();
         failedAccessOperations.clear();
-        selectingTarget = false; searchOffset = accessAttempts = returnFailures = 0; returnFailureTarget = -1;
+        selectingTarget = false; searchOffset = accessAttempts = 0;
         interactionTarget = selectedEndpoint = plannedEntrance = null; arrivalFailure = "";
         accessSupplyChecked = false;
         if (buildingAccess && !staircaseAccess && task != Task.ESCAPE) reconcileAccessPlan();
@@ -3380,13 +3551,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         returnRoute.clear();
         status = task.key;
-        List<int[]> goals = standingCandidates(plan[0],plan[1],plan[2],false);
-        List<int[]> route = goals.isEmpty() ? null : searchRoute(goals,removedX,removedY,removedZ);
+        List<int[]> route = stationRoute(null,removedX,removedY,removedZ);
         if (route != null) {
             java.util.Collections.reverse(route); returnRoute.addAll(route); navigationReason = navigationDetail = ""; return true;
         }
         if (!"chunk".equals(status)) {
-            navigationReason = "search_limit".equals(navigationReason) ? "return_limit" : "return_blocked";
+            navigationReason = "search_limit".equals(navigationReason) || "detour_limit".equals(navigationReason) ? "return_limit" : "return_blocked";
             navigationDetail = "Cannot leave after harvesting " + removedX+","+removedY+","+removedZ + ": " + navigationDetail;
         }
         return false;
@@ -3842,7 +4012,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         tag.setBoolean("BuildingAccess",buildingAccess || !accessPlan.isEmpty() && (accessProposals != null || reconsideringLadder)); tag.setInteger("AccessIndex",accessIndex);
         tag.setBoolean("StaircaseAccess",staircaseAccess); tag.setBoolean("StaircaseInstalled",staircaseInstalled);
         tag.setBoolean("RepairingLadder",repairingLadder);
-        tag.setInteger("AccessPolicyVersion",2);
+        tag.setInteger("AccessPolicyVersion",3);
+        if (workPosition != null) tag.setIntArray("WorkPosition",workPosition);
+        if (workPositionTarget != null) tag.setIntArray("WorkPositionTarget",workPositionTarget);
         if (buildingAccess && accessIndex < accessPlan.size()) tag.setIntArray("AccessOperation",Arrays.copyOf(accessPlan.get(accessIndex),3));
         if (ladderLanding != null) tag.setIntArray("LadderLanding",ladderLanding);
         tag.setTag("ConstructionRefuge",writeAccess(constructionRefuge));
@@ -3937,6 +4109,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         rampCleanup = accessRamp ? Math.max(-1,Math.min(plan[7]-plan[8],job.getInteger("RampCleanup"))) : -1;
         selectionRevision = Math.max(0,tag.getLong("SelectionRevision"));
         returnRoute.clear(); rejectedTargets.clear(); resetPath(); navigationReason = "";
+        endpointOrigin = null;
         navigationBlocked = selectingTarget = false; objectiveFailures = objectiveTicks = 0;
         watchedTerrain.clear(); terrainChecks = null; reachedPositions.clear(); clearRouteSearch(); clearAccessSearch();
         torches = tag.hasKey("Torches") ? ItemStack.loadItemStackFromNBT(tag.getCompoundTag("Torches")) : null;
@@ -3955,6 +4128,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int layer = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1);
         targetCursor = job.hasKey("WorkCursor") ? job.getInteger("WorkCursor") : -1;
         if (layer <= 0 || targetCursor < cursor || targetCursor / layer != cursor / layer) targetCursor = -1;
+        int[] savedWork = job.getIntArray("WorkPosition"), savedWorkTarget = job.getIntArray("WorkPositionTarget");
+        workPosition = configured && savedWork.length == 3 && inCorridor(savedWork[0],savedWork[2])
+                && savedWork[1] >= plan[8] && savedWork[1] <= plan[7]+1 ? savedWork : null;
+        workPositionTarget = configured && savedWorkTarget.length == 3 && inCorridor(savedWorkTarget[0],savedWorkTarget[2])
+                && savedWorkTarget[1] >= plan[8] && savedWorkTarget[1] <= plan[7]+1 ? savedWorkTarget : null;
+        if (workPositionTarget == null) workPosition = null;
         int[] site = tag.getIntArray("PendingDrops"); pendingDrops = site.length == 3 ? site : null;
         pendingDropsCaptured = pendingDrops != null && tag.getBoolean("PendingDropsCaptured");
         Arrays.fill(cargo, null); NBTTagList list = tag.getTagList("Cargo", 10);
@@ -4013,12 +4192,13 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         escapeDestination = landing.length == 3 && inCorridor(landing[0],landing[2]) ? landing : null;
         escapeJumping = false; escapeJumpTicks = 0; accessSupplies = Long.MIN_VALUE;
         sentLadderReminder = false;
-        if (ladderPosition != null && job.getInteger("AccessPolicyVersion") < 2) {
+        if (ladderPosition != null && job.getInteger("AccessPolicyVersion") < 3) {
             // Saved spare-material requests and verification/staircase travel do
             // not survive as commands. Reevaluate the actual fixed route first.
             restockLadders = restockBlocks = 0;
             if (task == Task.ESCAPE) task = Task.TO_WORK;
             buildingAccess = staircaseAccess = repairingLadder = false;
+            accessPlan.clear(); accessIndex = 0;
             constructionRefuge.clear();
             escapeOrigin = escapePillar = escapeDestination = null;
         }

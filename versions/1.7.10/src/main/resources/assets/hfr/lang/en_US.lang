@@ -1914,6 +1914,7 @@ xf.miner.access_stage.supplies=Waiting for exact access supplies
 xf.miner.access_stage.approach=Approaching the next access cell
 xf.miner.access_stage.placement=Placing supplied access
 xf.miner.standing_position=Selected interaction position: %s
+xf.miner.work_floor=Retained work-floor position: %s
 xf.miner.entrance=Planned descent / entrance: %s
 xf.miner.access_destination=Building access toward: %s
 xf.miner.actual=Actual feet position: %s

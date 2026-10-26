@@ -111,6 +111,8 @@ public final class GUIMinerNPC extends GuiContainer {
                 if (state.getBoolean("NavigationBlocked")) detail(lines,I18n.format("xf.miner.blocked_action"));
             }
             if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
+            int[] workFloor = state.getIntArray("WorkPosition");
+            if (workFloor.length == 3) detail(lines,I18n.format("xf.miner.work_floor",coord(workFloor[0],workFloor[1],workFloor[2])));
             int[] escape = state.getIntArray("EscapeDestination"), pillar = state.getIntArray("EscapePillar");
             if (escape.length == 3) detail(lines,I18n.format("xf.miner.escape_destination",coord(escape[0],escape[1],escape[2])));
             if (pillar.length == 4) detail(lines,I18n.format("xf.miner.escape_pillar",coord(pillar[0],pillar[1],pillar[2]),pillar[3]));
