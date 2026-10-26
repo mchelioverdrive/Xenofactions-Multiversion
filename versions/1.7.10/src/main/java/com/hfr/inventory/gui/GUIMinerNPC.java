@@ -160,6 +160,12 @@ public final class GUIMinerNPC extends GuiContainer {
             int[] dest = state.getIntArray("Destination"), waypoint = state.getIntArray("Waypoint");
             if (dest.length == 3) detail(lines,I18n.format("xf.miner.destination",coord(dest[0],dest[1],dest[2])));
             if (waypoint.length == 3) detail(lines,I18n.format("xf.miner.waypoint",coord(waypoint[0],waypoint[1],waypoint[2])));
+            if (!state.getString("MovementPhase").isEmpty())
+                detail(lines,I18n.format("xf.miner.movement_phase",I18n.format("xf.miner.phase."+state.getString("MovementPhase")),
+                        state.getInteger("RouteIndex"),state.getInteger("SegmentEnd"),state.getInteger("SegmentStallTicks")));
+            int[] precise = state.getIntArray("PreciseGoal");
+            if (precise.length == 3) detail(lines,I18n.format("xf.miner.precise_goal",coord(precise[0],precise[1],precise[2])));
+            if (!state.getString("SegmentFailure").isEmpty()) detail(lines,I18n.format("xf.miner.segment_failure",state.getString("SegmentFailure")));
             int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
             detail(lines,I18n.format("xf.miner.requests"));
             if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
