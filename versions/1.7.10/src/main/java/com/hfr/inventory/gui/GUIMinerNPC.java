@@ -98,6 +98,13 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
+            if (!state.getString("RecoveryAction").isEmpty()) {
+                detail(lines,I18n.format("xf.miner.local_recovery",I18n.format("xf.miner.recovery."+state.getString("RecoveryAction")),
+                        state.getInteger("RecoveryBlocksShort"),state.getInteger("RecoveryLaddersShort")));
+                int[] recoveryCell = state.getIntArray("RecoveryOperation");
+                if (recoveryCell.length == 3) detail(lines,I18n.format("xf.miner.access_operation",coord(recoveryCell[0],recoveryCell[1],recoveryCell[2])));
+                if (!state.getString("RecoveryBlocker").isEmpty()) detail(lines,state.getString("RecoveryBlocker"));
+            }
             int[] p = state.getIntArray("Plan"), target = state.getIntArray("Target");
             int blocks = state.getInteger("BlocksRequested"), ladders = state.getInteger("LaddersRequested");
             if (blocks > 0 || ladders > 0) detail(lines,ladders == 0 ? I18n.format("xf.miner.need_blocks",blocks) : I18n.format("xf.miner.need_access",blocks,ladders));
