@@ -43,8 +43,28 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     public static final int GUI_ID = 42, PLAN_SIZE = 9;
     private UUID factionId, employerId;
     private String employerName = "", status = "idle";
-    // chest X/Y/Z, min X/Z, max X/Z, top Y, bottom Y
+    // Legacy depot reference X/Y/Z, min X/Z, max X/Z, top Y, bottom Y.
+    // Travel and inventory ownership live in depots/activeDepot, independently of work.
     private int[] plan = new int[PLAN_SIZE];
+    private static final int MAX_DEPOTS = 256;
+    private static final class Depot {
+        final int dimension, x, y, z;
+        Depot(int dimension,int x,int y,int z) { this.dimension=dimension; this.x=x; this.y=y; this.z=z; }
+        int[] position() { return new int[] {x,y,z}; }
+        public boolean equals(Object other) {
+            if (!(other instanceof Depot)) return false;
+            Depot d = (Depot)other; return dimension == d.dimension && x == d.x && y == d.y && z == d.z;
+        }
+        public int hashCode() { return ((dimension*31+x)*31+y)*31+z; }
+    }
+    private final List<Depot> depots = new java.util.ArrayList<Depot>();
+    private Depot activeDepot;
+    private final List<Depot> reachableSupplyDepots = new java.util.ArrayList<Depot>();
+    // True records an exhausted route; false records a depot visited without resolving the need.
+    private final java.util.Map<Depot,Boolean> triedDepots = new java.util.HashMap<Depot,Boolean>();
+    private long depotWaitSupplies;
+    private boolean waitingForDepot;
+    private String depotFailure = "depots_unavailable";
     private int cursor, pathTicks, jobDimension;
     private boolean configured, running, toolBroken;
     private enum Task {
@@ -393,7 +413,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
     }
     private boolean storageTask() { return task == Task.TO_STORAGE || task == Task.DEPOSITING || task == Task.RESTOCKING; }
-    private int[] depotDestination() { return new int[] {plan[0],plan[1],plan[2]}; }
+    private int[] depotDestination() {
+        if (activeDepot != null) return activeDepot.position();
+        for (Depot depot : depots) if (depot.dimension == dimension) return depot.position();
+        // Only a diagnostic/recovery hint when there are no links; never grants inventory access.
+        return new int[] {plan[0],plan[1],plan[2]};
+    }
     private int[] taskDestination() {
         return storageTask() ? depotDestination()
                 : buildingAccess && accessDestination != null ? accessDestination.clone() : workDestination();
@@ -456,8 +481,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (reason == StorageReason.TORCHES) stockTorchesFromCargo();
         if (!storageNeeded(reason)) return;
         storageReason = reason;
+        triedDepots.clear(); waitingForDepot = false; activeDepot = null;
         if (reason != StorageReason.OVERFLOW) capacityDetail = "";
-        transition(Task.TO_STORAGE,reason.key,new int[] {plan[0],plan[1],plan[2]});
+        chooseDepot();
+        transition(Task.TO_STORAGE,reason.key,depotDestination());
     }
     private boolean storageNeeded(StorageReason reason) {
         switch (reason) {
@@ -511,6 +538,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (hadFailures) diagnostic("reset",reason);
     }
     private void retryObjective(String reason) {
+        triedDepots.clear(); waitingForDepot=false;
         movementRecovery.clear();
         if (debugHistory != null) { movementDecision = "retry: " + reason; trace("recovery",movementDecision); }
         localRecoveryCell = localRecoveryMove = null; localRecoveryDrop = null;
@@ -742,6 +770,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void blockObjective(String state) {
         // A wait is the final recovery state, never the gate in front of recovery.
         if (movementRecovery.begin(state)) return;
+        if (storageTask() && activeDepot != null) { nextDepot(true); return; }
         if (debugHistory != null) trace("blocked",state + "; " + navigationReason + "; " + navigationDetail);
         if ("no_access".equals(state)) state = supportRequirement() > accessCount(false) || ladderRequirement() > accessCount(true)
                 ? "access_materials" : "access_route";
@@ -755,10 +784,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private long supplyStamp() { return supplyStamp(false); }
     private long supplyStamp(boolean relevantOnly) {
-        IInventory station = stationAssigned ? stationInventory(plan[0],plan[1],plan[2]) : null;
-        long value = station == null ? 1 : 2;
-        for (int i = 0, size = getSizeInventory()+(station == null ? 0 : station.getSizeInventory()); i < size; i++) {
-            ItemStack stack = i < getSizeInventory() ? getStackInSlot(i) : station.getStackInSlot(i-getSizeInventory());
+        long value = 1;
+        List<IInventory> inventories=new java.util.ArrayList<IInventory>(); inventories.add(this);
+        for (Depot depot : depots) {
+            IInventory station=depotInventory(depot); value=31*value+depot.hashCode()+(station == null ? 0 : 1);
+            if (station != null) inventories.add(station);
+        }
+        for (IInventory inventory : inventories) for (int i=firstSlot(inventory); i<inventory.getSizeInventory(); i++) {
+            ItemStack stack = inventory.getStackInSlot(i);
             // Access can be blocked before a plan is selected, too.
             if (relevantOnly && !(configured && (accessMaterial(stack,false) || accessMaterial(stack,true)))
                     && !(pickaxe(stack) && (getHeldItem() == null || requiredHarvest >= 0)) && !(needsLight && isTorch(stack))) continue;
@@ -828,34 +861,112 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!stationAssigned) return "xf.miner.no_chest";
         if (jobDimension != dimension) return "xf.miner.state.dimension";
         if (!area) return "";
-        return validateArea(next);
+        String error=validateArea(next);
+        if (!error.isEmpty()) return error;
+        boolean available=false;
+        for (Depot depot : depots) if (depot.dimension == dimension) {
+            if (!depotFitsArea(depot,next)) return "xf.miner.invalid_area";
+            if (depotInventory(depot) != null) available=true;
+        }
+        return available ? "" : "xf.miner.state.depots_unavailable";
+    }
+    private boolean depotFitsArea(Depot depot,int[] next) {
+        return Math.abs((long)next[3]-depot.x) <= 128 && Math.abs((long)next[5]-depot.x) <= 128
+                && Math.abs((long)next[4]-depot.z) <= 128 && Math.abs((long)next[6]-depot.z) <= 128;
     }
     private String validateArea(int[] next) {
         long width = (long)next[5] - next[3] + 1, length = (long)next[6] - next[4] + 1, depth = (long)next[7] - next[8] + 1;
         if (width < 1 || width > 64 || length < 1 || length > 64 || depth < 1 || depth > worldObj.getHeight()
-                || width * length * depth > 262144 || next[8] < 0 || next[7] >= worldObj.getHeight()
-                || next[1] < 0 || next[1] >= worldObj.getHeight()) return "xf.miner.invalid_area";
-        for (int i : new int[] {0, 2, 3, 4, 5, 6}) if (Math.abs((long)next[i]) > 30000000) return "xf.miner.invalid_area";
-        if (Math.abs((long)next[3] - next[0]) > 128 || Math.abs((long)next[5] - next[0]) > 128
-                || Math.abs((long)next[4] - next[2]) > 128 || Math.abs((long)next[6] - next[2]) > 128) return "xf.miner.invalid_area";
-        if (!WorkerAccess.ownsLand(worldObj, next[0], next[2], factionId)) return "xf.worker.denied";
+                || width * length * depth > 262144 || next[8] < 0 || next[7] >= worldObj.getHeight()) return "xf.miner.invalid_area";
+        for (int i : new int[] {3, 4, 5, 6}) if (Math.abs((long)next[i]) > 30000000) return "xf.miner.invalid_area";
         for (int x = next[3]; x <= next[5]; x++) for (int z = next[4]; z <= next[6]; z++)
             if (!WorkerAccess.ownsLand(worldObj, x, z, factionId)) return "xf.worker.denied";
-        if (stationInventory(next[0], next[1], next[2]) == null) return "xf.miner.state." + stationUnavailable(next[0], next[1], next[2]);
         return "";
     }
     public String selectStation(EntityPlayer player, int x, int y, int z) {
+        return selectStation(player,x,y,z,false);
+    }
+    public String selectStation(EntityPlayer player, int x, int y, int z, boolean remove) {
+        if (worldObj.isRemote) return "xf.worker.denied";
         if (!maySelect(player) || !WorkerAccess.ownsLand(worldObj, x, z, factionId)) return "xf.worker.denied";
         if (Math.abs((long)x) > 30000000 || Math.abs((long)z) > 30000000 || y < 0 || y >= worldObj.getHeight()) return "xf.miner.no_chest";
-        if (stationInventory(x, y, z) == null) return "xf.miner.state." + stationUnavailable(x, y, z);
+        if (!worldObj.blockExists(x,y,z)) return "xf.miner.state.chunk";
+        if (remove) {
+            if (!station(worldObj.getTileEntity(x,y,z))) return "xf.miner.no_chest";
+            String unavailable=stationUnavailable(x,y,z);
+            if ("chunk".equals(unavailable) || "denied".equals(unavailable)) return "xf.miner.state."+unavailable;
+        }
+        if (!remove && stationInventory(x, y, z) == null) return "xf.miner.state." + stationUnavailable(x, y, z);
+        normalizeDepots();
+        Depot selected = canonicalDepot(new Depot(dimension,x,y,z));
+        if (remove) {
+            if (!depots.remove(selected)) return "xf.miner.station_not_linked";
+            if (selected.equals(activeDepot)) cancelDepotTravel();
+            stationAssigned = !depots.isEmpty(); accessSupplyChecked = false; waitingForDepot = false; triedDepots.clear();
+            return "xf.miner.station_removed";
+        }
+        if (depots.contains(selected)) return "xf.miner.station_duplicate";
+        if (depots.size() >= MAX_DEPOTS) return "xf.miner.station_limit";
         int[] next = plan.clone(); next[0] = x; next[1] = y; next[2] = z;
-        // An existing area must still fit the replacement station's distance limits.
         String error = configured ? validateArea(next) : "";
         if (!error.isEmpty()) return error;
-        pause(); plan = next; stationAssigned = true; jobDimension = dimension; returnRoute.clear();
-        task = Task.TO_WORK; storageReason = StorageReason.NONE;
-        retryObjective("station instruction changed");
+        if (configured && !depotFitsArea(selected,next)) return "xf.miner.invalid_area";
+        depots.add(selected); stationAssigned = true; jobDimension = dimension;
+        // Keep old Plan readers/save migration compatible; adding links never replaces work.
+        if (depots.size() == 1) { plan[0]=x; plan[1]=y; plan[2]=z; }
+        accessSupplyChecked = false; waitingForDepot = false; triedDepots.clear();
         return "xf.miner.station_set";
+    }
+    private static int compareDepots(Depot a,Depot b) {
+        int c = Integer.compare(a.dimension,b.dimension);
+        if (c == 0) c = Integer.compare(a.x,b.x);
+        if (c == 0) c = Integer.compare(a.y,b.y);
+        return c == 0 ? Integer.compare(a.z,b.z) : c;
+    }
+    private Depot canonicalDepot(Depot depot) {
+        if (depot.dimension != dimension || !worldObj.blockExists(depot.x,depot.y,depot.z)
+                || worldObj.getTileEntity(depot.x,depot.y,depot.z) == null
+                || worldObj.getTileEntity(depot.x,depot.y,depot.z).getClass() != net.minecraft.tileentity.TileEntityChest.class) return depot;
+        Depot first = depot; Block block = worldObj.getBlock(depot.x,depot.y,depot.z);
+        for (int[] d : new int[][] {{-1,0},{1,0},{0,-1},{0,1}}) {
+            int x=depot.x+d[0], z=depot.z+d[1];
+            if (!worldObj.blockExists(x,depot.y,z) || worldObj.getBlock(x,depot.y,z) != block) continue;
+            TileEntity tile = worldObj.getTileEntity(x,depot.y,z);
+            if (tile != null && tile.getClass() == net.minecraft.tileentity.TileEntityChest.class) {
+                Depot other = new Depot(dimension,x,depot.y,z); if (compareDepots(other,first) < 0) first = other;
+            }
+        }
+        return first;
+    }
+    private void normalizeDepots() {
+        java.util.LinkedHashSet<Depot> unique = new java.util.LinkedHashSet<Depot>();
+        for (Depot depot : depots) unique.add(canonicalDepot(depot));
+        depots.clear(); depots.addAll(unique);
+        if (activeDepot != null) activeDepot = canonicalDepot(activeDepot);
+        stationAssigned = !depots.isEmpty();
+    }
+    private IInventory depotInventory(Depot depot) {
+        return depot.dimension == dimension ? stationInventory(depot.x,depot.y,depot.z) : null;
+    }
+    private List<Depot> orderedDepots() {
+        List<Depot> ordered = new java.util.ArrayList<Depot>(depots);
+        java.util.Collections.sort(ordered,(a,b) -> {
+            int c = Double.compare(getDistanceSq(a.x+.5,a.y+.5,a.z+.5),getDistanceSq(b.x+.5,b.y+.5,b.z+.5));
+            return c == 0 ? compareDepots(a,b) : c;
+        });
+        return ordered;
+    }
+    private void cancelDepotTravel() {
+        boolean repairingDepot = depotRepair();
+        activeDepot = null; returnRoute.clear(); reachableSupplyDepots.clear();
+        if (!storageTask()) return;
+        // Cancel the temporary action only; cursor, work position, drops and progress survive.
+        clearMovementCommands(); preciseGoal = null; destination = waypoint = null;
+        travelRoute.clear(); recoveryRoute.clear(); recoveringCorridor = false; movementRecovery.clear();
+        interactionTarget = selectedEndpoint = plannedEntrance = null; failedEndpoints.clear(); clearRouteSearch();
+        pathTicks = navigationFailures = objectiveFailures = objectiveTicks = 0;
+        if (repairingDepot) { buildingAccess = false; accessPlan.clear(); accessIndex = 0; accessDestination = null; clearAccessSearch(); }
+        navigationBlocked = false; task = Task.TO_STORAGE;
     }
     // Only Start can install a validated, confirmed replacement. Real overflow drops remain collectible.
     private void configure(int[] next) {
@@ -878,9 +989,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         rampOffset = 0; rampDirection = 1;
         if (accessRamp) {
             double best = Double.MAX_VALUE;
+            int[] depot=depotDestination();
             for (int i = 0; i < rampPerimeter(); i++) {
                 int[] r = rampColumn(i);
-                double d = (double)(r[0]-plan[0])*(r[0]-plan[0])+(double)(r[1]-plan[2])*(r[1]-plan[2]);
+                double d = (double)(r[0]-depot[0])*(r[0]-depot[0])+(double)(r[1]-depot[2])*(r[1]-depot[2]);
                 if (d < best) { best = d; rampOffset = i; }
             }
         }
@@ -931,15 +1043,15 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (!running) {
             running = true; retryObjective("Start / Resume instruction");
             // Resume an explicit saved trip, never infer a trip from partial cargo.
-            destination = storageTask() ? new int[] {plan[0],plan[1],plan[2]} : workDestination();
+            triedDepots.clear(); waitingForDepot=false;
+            destination = storageTask() ? depotDestination() : workDestination();
         } else if (navigationBlocked) retryObjective("explicit Start instruction");
         if (!recoveringCorridor && !inCorridor((int)Math.floor(posX),(int)Math.floor(posZ))) beginCorridorRecovery();
         return new Activation("");
     }
     public void onLivingUpdate() {
         // Permission and explicit Pause own every controller, including movement ticks.
-        if (!worldObj.isRemote && running && (!configured || !authorized() || jobDimension != dimension
-                || !WorkerAccess.ownsLand(worldObj,plan[0],plan[2],factionId))) stop("denied");
+        if (!worldObj.isRemote && running && (!configured || !authorized() || jobDimension != dimension)) stop("denied");
         if (!worldObj.isRemote && running && preciseGoal == null && !landingInProgress() && !navigationBlocked && !recoveringCorridor && interactionTarget != null
                 && worldObj.blockExists(interactionTarget[0],interactionTarget[1]-(interactionMining ? 1 : 0),interactionTarget[2])) {
             int ty = interactionTarget[1]-(interactionMining ? 1 : 0);
@@ -983,12 +1095,27 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void work() {
         if (!configured || !authorized()) { stop("denied"); return; }
         if (jobDimension != dimension) { stop("dimension"); return; }
-        if (!WorkerAccess.ownsLand(worldObj, plan[0], plan[2], factionId)) { stop("denied"); return; }
         // Finish the accepted physics transition before target/supply changes
         // can clear its steering or issue another ascent/descent command.
         if (landingInProgress() || preciseGoal != null) {
             status = verticalControl() ? ladderActivity() : precisePhase == PrecisePhase.FLOOR ? "stepping" : "descending";
             return;
+        }
+        normalizeDepots();
+        if (depots.isEmpty()) { status="no_depots"; supplyCheckTicks=40; return; }
+        boolean availableDepot=false;
+        for (Depot depot : depots) if (depotInventory(depot) != null) { availableDepot=true; break; }
+        if (!availableDepot) { status="depots_unavailable"; supplyCheckTicks=40; return; }
+        if (storageTask() && (activeDepot == null || depotInventory(activeDepot) == null)) {
+            if (activeDepot != null) { nextDepot(); return; }
+            if (waitingForDepot) {
+                if (depotWaitSupplies != supplyStamp() || depotTerrainChanged()) {
+                    triedDepots.clear(); failedMovementEdges.clear(); failedEndpoints.clear();
+                }
+                else if ("depots_unreachable".equals(depotFailure)) { status=depotFailure; supplyCheckTicks=40; return; }
+            }
+            if (!chooseDepot()) return;
+            transition(Task.TO_STORAGE,"linked depot selected",depotDestination());
         }
         if (observeRecoveryTerrain()) return;
         // Recovery runs before the stable wait and before inventory/work decisions.
@@ -1066,7 +1193,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         if (storageTask()) {
             if (!buildingAccess && accessProposals != null && Arrays.equals(accessSearchTarget,depotDestination()) && !accessSearchExhausted) {
-                planAccess(plan[0],plan[1],plan[2]); return;
+                int[] depot=depotDestination(); planAccess(depot[0],depot[1],depot[2]); return;
             }
             if (depotRepair() && buildingAccess) { constructAccess(); return; }
             visitChest(); return;
@@ -2216,16 +2343,17 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean inCorridor(int x,int z) {
         if (x >= plan[3]-8 && x <= plan[5]+8 && z >= plan[4]-8 && z <= plan[6]+8) return true;
-        int wx = Math.max(plan[3],Math.min(plan[5],plan[0])), wz = Math.max(plan[4],Math.min(plan[6],plan[2]));
-        return corridorLeg(x,z,wx,wz) || pendingDrops != null && corridorLeg(x,z,pendingDrops[0],pendingDrops[2]);
+        for (Depot depot : depots) if (depot.dimension == dimension) {
+            int wx = Math.max(plan[3],Math.min(plan[5],depot.x)), wz = Math.max(plan[4],Math.min(plan[6],depot.z));
+            if (corridorLegDistanceSq(x,z,depot,wx,wz) <= 256
+                    || pendingDrops != null && corridorLegDistanceSq(x,z,depot,pendingDrops[0],pendingDrops[2]) <= 256) return true;
+        }
+        return false;
     }
-    private boolean corridorLeg(int x,int z,int wx,int wz) {
-        return corridorLegDistanceSq(x,z,wx,wz) <= 256;
-    }
-    private double corridorLegDistanceSq(int x,int z,int wx,int wz) {
-        double dx = wx-plan[0], dz = wz-plan[2], length = dx*dx+dz*dz;
-        double t = length == 0 ? 0 : Math.max(0,Math.min(1,((x-plan[0])*dx+(z-plan[2])*dz)/length));
-        double ox = x-plan[0]-t*dx, oz = z-plan[2]-t*dz;
+    private double corridorLegDistanceSq(int x,int z,Depot depot,int wx,int wz) {
+        double dx = wx-depot.x, dz = wz-depot.z, length = dx*dx+dz*dz;
+        double t = length == 0 ? 0 : Math.max(0,Math.min(1,((x-depot.x)*dx+(z-depot.z)*dz)/length));
+        double ox = x-depot.x-t*dx, oz = z-depot.z-t*dz;
         return ox*ox+oz*oz;
     }
     /** Lower bound to any corridor entry, not a commitment to the nearest geometric entry.
@@ -2234,9 +2362,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int dx = Math.max(0,Math.max(plan[3]-8-x,x-plan[5]-8));
         int dz = Math.max(0,Math.max(plan[4]-8-z,z-plan[6]-8));
         double distance = Math.sqrt((double)dx*dx+(double)dz*dz);
-        int wx = Math.max(plan[3],Math.min(plan[5],plan[0])), wz = Math.max(plan[4],Math.min(plan[6],plan[2]));
-        distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,wx,wz))-16));
-        if (pendingDrops != null) distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,pendingDrops[0],pendingDrops[2]))-16));
+        for (Depot depot : depots) if (depot.dimension == dimension) {
+            int wx = Math.max(plan[3],Math.min(plan[5],depot.x)), wz = Math.max(plan[4],Math.min(plan[6],depot.z));
+            distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,depot,wx,wz))-16));
+            if (pendingDrops != null) distance = Math.min(distance,Math.max(0,Math.sqrt(corridorLegDistanceSq(x,z,depot,pendingDrops[0],pendingDrops[2]))-16));
+        }
         return (int)Math.floor(10*distance);
     }
     private boolean safeEdge(int[] a,int[] b,int rx,int ry,int rz) {
@@ -2303,7 +2433,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return -1;
     }
     private boolean stationEndpoint(int[] p) {
-        return interactionFailure(p[0]+.5,nodeY(p),p[2]+.5,plan[0],plan[1],plan[2],false,false).isEmpty();
+        for (Depot depot : depots) if (depotInventory(depot) != null && (!storageTask() || activeDepot == null || activeDepot.equals(depot))
+                && interactionFailure(p[0]+.5,nodeY(p),p[2]+.5,depot.x,depot.y,depot.z,false,false).isEmpty()) return true;
+        return false;
     }
     private List<int[]> cachedTravel(List<int[]> goals,int removedX,int removedY,int removedZ) {
         if (returnRoute.isEmpty() || !stationEndpoint(returnRoute.get(0))) { returnRoute.clear(); return null; }
@@ -2610,9 +2742,17 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return stationRoute(start,-30000001,-1,0);
     }
     private List<int[]> stationRoute(int[] start,int rx,int ry,int rz) {
-        List<int[]> exits = standingCandidates(plan[0],plan[1],plan[2],false);
+        for (Depot depot : orderedDepots()) if (depotInventory(depot) != null
+                && (!storageTask() || activeDepot == null || activeDepot.equals(depot))) {
+            List<int[]> route=routeToDepot(depot,start,rx,ry,rz);
+            if (route != null) return route;
+        }
+        return null;
+    }
+    private List<int[]> routeToDepot(Depot depot,int[] start,int rx,int ry,int rz) {
+        List<int[]> exits = standingCandidates(depot.x,depot.y,depot.z,false);
         if (exits.isEmpty()) {
-            navigationReason = "standing"; navigationDetail = "No storage endpoint near " + plan[0]+","+plan[1]+","+plan[2]; return null;
+            navigationReason = "standing"; navigationDetail = "No storage endpoint near " + depot.x+","+depot.y+","+depot.z; return null;
         }
         boolean below = ladderLanding != null && (start == null ? boundingBox.minY : start[1]) < ladderLanding[1]-.1;
         List<int[]> fixed = below ? fixedLadderTravel(exits,start,rx,ry,rz,false) : null;
@@ -2663,7 +2803,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return route;
     }
     private void checkAccessStation() {
-        accessStationReachable = stationRoute(null) != null;
+        reachableSupplyDepots.clear();
+        for (Depot depot : orderedDepots()) if (depotInventory(depot) != null && routeToDepot(depot,null,-30000001,-1,0) != null)
+            reachableSupplyDepots.add(depot);
+        accessStationReachable = !reachableSupplyDepots.isEmpty();
         accessSupplyChecked = true;
     }
     /** Prove escape in the post-edit graph, independently of the entrance path.
@@ -2837,10 +2980,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private int availableAccess(boolean rung,boolean repair) {
         int count = accessCount(rung);
-        IInventory station = accessSupplyChecked && accessStationReachable ? stationInventory(plan[0],plan[1],plan[2]) : null;
-        if (station != null) for (int i = firstSlot(station); i < station.getSizeInventory(); i++) {
-            ItemStack stack = station.getStackInSlot(i);
-            if (accessMaterial(stack,rung)) count += stack.stackSize;
+        if (accessSupplyChecked) for (Depot depot : reachableSupplyDepots) {
+            IInventory station=depotInventory(depot);
+            if (station != null) for (int i = firstSlot(station); i < station.getSizeInventory(); i++) {
+                ItemStack stack = station.getStackInSlot(i);
+                if (accessMaterial(stack,rung)) count += stack.stackSize;
+            }
         }
         return rung || ladderPosition != null || repair ? count : Math.max(0,count-emergencyBlocks());
     }
@@ -3768,23 +3913,55 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return !depotRepair() || accessTripFloor < 0 || cell[1] >= accessTripFloor-1;
     }
     private static boolean accessMaterial(ItemStack stack,boolean rung) {
-        if (stack == null || stack.stackSize <= 0 || !(stack.getItem() instanceof net.minecraft.item.ItemBlock) || stack.hasTagCompound()) return false;
+        if (stack == null || stack.stackSize <= 0 || !(stack.getItem() instanceof net.minecraft.item.ItemBlock)) return false;
         Block b = ((net.minecraft.item.ItemBlock)stack.getItem()).field_150939_a;
         return rung ? b == net.minecraft.init.Blocks.ladder : b.isNormalCube() && !(b instanceof net.minecraft.block.BlockFalling)
                 && !b.hasTileEntity(stack.getItemDamage()) && b != net.minecraft.init.Blocks.bedrock && b != net.minecraft.init.Blocks.command_block
-                && (b.getMaterial() == net.minecraft.block.material.Material.rock || b.getMaterial() == net.minecraft.block.material.Material.ground);
+                && (b.getMaterial() == net.minecraft.block.material.Material.rock || b.getMaterial() == net.minecraft.block.material.Material.ground)
+                && !oreMaterial(stack,b);
+    }
+    private static boolean oreMaterial(ItemStack stack,Block block) {
+        for (int id : net.minecraftforge.oredict.OreDictionary.getOreIDs(stack))
+            if (net.minecraftforge.oredict.OreDictionary.getOreName(id).toLowerCase(java.util.Locale.ROOT).startsWith("ore")) return true;
+        Object itemId = net.minecraft.item.Item.itemRegistry.getNameForObject(stack.getItem());
+        Object blockId = Block.blockRegistry.getNameForObject(block);
+        return itemId != null && itemId.toString().toLowerCase(java.util.Locale.ROOT).contains("ore")
+                || blockId != null && blockId.toString().toLowerCase(java.util.Locale.ROOT).contains("ore");
+    }
+    /** Shared order for placement, reserves and withdrawals; suitability always precedes preference. */
+    private static int materialRank(ItemStack stack,boolean rung) {
+        if (!accessMaterial(stack,rung)) return -1;
+        if (rung || ((net.minecraft.item.ItemBlock)stack.getItem()).field_150939_a == net.minecraft.init.Blocks.cobblestone) return 0;
+        for (int id : net.minecraftforge.oredict.OreDictionary.getOreIDs(stack))
+            if ("cobblestone".equals(net.minecraftforge.oredict.OreDictionary.getOreName(id))) return 1;
+        return 2;
+    }
+    private int accessSlot(boolean rung) {
+        int best = -1, rank = Integer.MAX_VALUE;
+        for (int i = 0; i < cargo.length; i++) {
+            int next = materialRank(cargo[i],rung);
+            if (next >= 0 && next < rank) { best = i; rank = next; }
+        }
+        return best;
+    }
+    private boolean reserveWorkSupplies() {
+        return configured && (blockWorkRemaining() || pendingDrops != null && !pendingDropsCaptured);
+    }
+    private int[] cargoReservations() {
+        int[] reserved = new int[cargo.length];
+        if (!reserveWorkSupplies()) return reserved;
+        int blocks = Math.max(retainedMaterialRequirement(false),Math.max(supportRequirement(),emergencyBlocks()));
+        for (int rank = 0; rank < 3; rank++) for (int i = 0; i < cargo.length; i++) {
+            if (accessMaterial(cargo[i],true)) reserved[i] = cargo[i].stackSize; // Future descent/repair, even with no current missing rungs.
+            else if (materialRank(cargo[i],false) == rank) { reserved[i] = Math.min(blocks,cargo[i].stackSize); blocks -= reserved[i]; }
+        }
+        return reserved;
     }
     private int accessCount(boolean rung) {
         int count = 0; for (ItemStack stack : cargo) if (accessMaterial(stack,rung)) count += stack.stackSize; return count;
     }
     private long ladderSupplyStamp() {
-        long stamp = 1;
-        IInventory station = stationAssigned ? stationInventory(plan[0],plan[1],plan[2]) : null;
-        for (int i = 0; i < cargo.length+(station == null ? 0 : station.getSizeInventory()); i++) {
-            ItemStack stack = i < cargo.length ? cargo[i] : station.getStackInSlot(i-cargo.length);
-            if (accessMaterial(stack,true)) stamp = stamp*31+i+961L*stack.stackSize;
-        }
-        return stamp;
+        return supplyStamp(true);
     }
     private void reconsiderStaircase() {
         if (restockLadders > 0) return;
@@ -4256,7 +4433,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             // Also migrate an unfinished ladder-only plan from an older save, or
             // react to removed supplies. Keep its real built cells and fixed column.
             int[] goal = accessDestination == null ? workDestination() : accessDestination;
-            if (goal == null) goal = new int[] {plan[0],plan[1],plan[2]};
+            if (goal == null) goal = depotDestination();
             clearAccessSearch(); accessSearchTarget = goal.clone();
             accessProposals = new java.util.ArrayList<List<int[]>>();
             addStaircaseProposals(goal[1]);
@@ -4526,7 +4703,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private boolean placeAccess(int[] p) {
         if (p[3] < 0 || p[3] > 0 && !fixedRung(p)) return accessPlacementFailure(p,"placement","Operation is not a placement on the fixed route");
         if (p[3] == 0 && ladderPassage(p)) return accessPlacementFailure(p,"clearance","Support would obstruct the reserved ladder passage");
-        int slot = -1; for (int i = 0; i < cargo.length; i++) if (accessMaterial(cargo[i],p[3] != 0)) { slot = i; break; }
+        int slot = accessSlot(p[3] != 0);
         if (slot < 0) return accessPlacementFailure(p,"supplies","Missing supplied " + (p[3] > 0 ? "ladder" : "support block"));
         String site = accessSiteFailure(p[0],p[1],p[2]);
         if (!site.isEmpty()) return accessPlacementFailure(p,"placement",site);
@@ -4660,6 +4837,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private void terminalNavigation() {
         // Preserve the final diagnostic while freezing execution until conditions change.
+        boolean wasStorage=storageTask(); Depot failedDepot=activeDepot;
         int[] dest = destination == null ? new int[0] : destination.clone();
         int[] step = waypoint == null ? new int[0] : waypoint.clone();
         String reason = navigationReason.isEmpty() ? "path" : navigationReason;
@@ -4677,45 +4855,135 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     + " range=" + getNavigator().getPathSearchRange() + " bounds=" + Arrays.toString(plan) + " detail=" + navigationDetail
                     + " " + endpointDiagnostic(arrivalFailure));
         }
-        blockObjective("navigation_failed"); navigationReason = reason; destination = dest.length == 3 ? dest : null; waypoint = step.length == 3 ? step : null;
+        blockObjective("navigation_failed");
+        // Recovery may have selected another depot. Old diagnostics cannot restore its failed travel action.
+        if (storageTask() && (!wasStorage || !java.util.Objects.equals(failedDepot,activeDepot) || waitingForDepot)) return;
+        navigationReason = reason; destination = dest.length == 3 ? dest : null; waypoint = step.length == 3 ? step : null;
         recoveryOrigin = recoveryStart; recoveryDestination = recoveryEnd; recoveryAttempts = attempts;
     }
+    private int requiredLadders() { return Math.max(restockLadders,ladderRequirement()); }
+    private boolean depotTerrainChanged() {
+        if (terrainChecks == null || !terrainChecks.hasNext()) terrainChecks=watchedTerrain.values().iterator();
+        for (int checked=0; checked<512 && terrainChecks.hasNext(); checked++) {
+            int[] p=terrainChecks.next(); boolean loaded=worldObj.blockExists(p[0],p[1],p[2]);
+            if ((loaded ? Block.getIdFromBlock(worldObj.getBlock(p[0],p[1],p[2])) : -1) != p[3]
+                    || loaded && worldObj.getBlockMetadata(p[0],p[1],p[2]) != p[4]
+                    || (WorkerAccess.ownsLand(worldObj,p[0],p[2],factionId) ? 1 : 0) != p[5]) return true;
+        }
+        return false;
+    }
+    private List<ItemStack> depositCargo() {
+        List<ItemStack> stacks = new java.util.ArrayList<ItemStack>(); int[] reserved = cargoReservations();
+        for (int i=0; i<cargo.length; i++) if (cargo[i] != null && cargo[i].stackSize > reserved[i]) {
+            ItemStack stack = cargo[i].copy(); stack.stackSize -= reserved[i]; stacks.add(stack);
+        }
+        for (ItemStack stack : overflowDrops) if (!(reserveWorkSupplies() && accessMaterial(stack,true))) stacks.add(stack.copy());
+        return stacks;
+    }
+    private boolean acceptsCargo(IInventory inventory,List<ItemStack> stacks) {
+        for (ItemStack stack : stacks) for (int i=firstSlot(inventory); i<inventory.getSizeInventory(); i++) {
+            ItemStack stored=inventory.getStackInSlot(i);
+            if (inventory.isItemValidForSlot(i,stack) && (stored == null || stored.isItemEqual(stack) && ItemStack.areItemStackTagsEqual(stored,stack))
+                    && (stored == null ? 0 : stored.stackSize) < Math.min(inventory.getInventoryStackLimit(),stack.getMaxStackSize())) return true;
+        }
+        return false;
+    }
+    private boolean suppliesUseful(IInventory inventory) {
+        for (int i=firstSlot(inventory); i<inventory.getSizeInventory(); i++) {
+            ItemStack stack=inventory.getStackInSlot(i);
+            if (stack == null || stack.stackSize <= 0) continue;
+            if (blockWorkRemaining() && !suitable(getHeldItem()) && suitable(stack)) return true;
+            if (needsLight && torchCount() == 0 && isTorch(stack)) return true;
+            if (remainingCapacity(stack) > 0 && (accessCount(false) < supportRequirement() && accessMaterial(stack,false)
+                    || accessCount(true) < requiredLadders() && accessMaterial(stack,true))) return true;
+        }
+        return false;
+    }
+    private int depotSupportRank(Depot depot) {
+        if (accessCount(false) >= supportRequirement()) return 3;
+        IInventory inventory=depotInventory(depot); int best=3;
+        if (inventory != null) for (int i=firstSlot(inventory); i<inventory.getSizeInventory(); i++) {
+            ItemStack stack=inventory.getStackInSlot(i); int rank=materialRank(stack,false);
+            if (rank >= 0 && rank < best && remainingCapacity(stack) > 0) best=rank;
+        }
+        return best;
+    }
+    /** Select once per trip/failure. Inspection never loads a chunk or changes the work plan. */
+    private boolean chooseDepot() {
+        normalizeDepots();
+        List<ItemStack> cargoToDeposit=depositCargo();
+        boolean unloading=!cargoToDeposit.isEmpty();
+        List<Depot> ordered=orderedDepots();
+        if (!unloading) java.util.Collections.sort(ordered,(a,b) -> {
+            int c=Integer.compare(depotSupportRank(a),depotSupportRank(b));
+            if (c == 0) c=Double.compare(getDistanceSq(a.x+.5,a.y+.5,a.z+.5),getDistanceSq(b.x+.5,b.y+.5,b.z+.5));
+            return c == 0 ? compareDepots(a,b) : c;
+        });
+        boolean available=false, useful=false, unreachable=false; Depot repair=null;
+        for (Depot depot : ordered) {
+            IInventory inventory=depotInventory(depot);
+            if (inventory == null) continue;
+            available=true;
+            if (!(unloading ? acceptsCargo(inventory,cargoToDeposit) : suppliesUseful(inventory))) continue;
+            useful=true;
+            if (triedDepots.containsKey(depot)) { unreachable |= triedDepots.get(depot); continue; }
+            if (routeToDepot(depot,null,-30000001,-1,0) != null) {
+                activeDepot=depot; waitingForDepot=false; returnRoute.clear(); return true;
+            }
+            unreachable=true;
+            if (repair == null) repair=depot;
+        }
+        // Preserve the established movement/access recovery for a useful but broken approach.
+        if (repair != null) { activeDepot=repair; waitingForDepot=false; returnRoute.clear(); return true; }
+        activeDepot=null;
+        depotFailure=depots.isEmpty() ? "no_depots" : !available ? "depots_unavailable" : useful && unreachable ? "depots_unreachable"
+                : unloading ? "storage_full" : "depot_supplies";
+        status=depotFailure; waitingForDepot=true; depotWaitSupplies=supplyStamp(); supplyCheckTicks=40;
+        return false;
+    }
+    private boolean nextDepot() { return nextDepot(false); }
+    private boolean nextDepot(boolean unreachable) {
+        if (activeDepot != null) triedDepots.put(activeDepot,unreachable);
+        cancelDepotTravel();
+        if (!chooseDepot()) return false;
+        transition(Task.TO_STORAGE,"try another linked depot",depotDestination()); return true;
+    }
+    private void waitForDepotSupplies(String missing) {
+        if (nextDepot()) return;
+        // A reachable inventory missing the requested type is distinct from unavailable routes.
+        if ("depot_supplies".equals(depotFailure)) status=missing;
+    }
     private void visitChest() {
-        if (!worldObj.blockExists(plan[0], plan[1], plan[2])) { status = "chunk"; return; }
-        IInventory chest = stationInventory(plan[0], plan[1], plan[2]);
-        if (chest == null) { status = stationUnavailable(plan[0], plan[1], plan[2]); return; }
-        if (!moveNear(plan[0], plan[1], plan[2])) {
+        if (activeDepot == null && !chooseDepot()) return;
+        IInventory chest = depotInventory(activeDepot);
+        if (chest == null) { nextDepot(); return; }
+        int[] depot=activeDepot.position();
+        if (!moveNear(depot[0],depot[1],depot[2])) {
             if ("route_failed".equals(status)) terminalNavigation();
             return;
         }
         if (task != Task.RESTOCKING)
-            transition(Task.DEPOSITING,"at storage: " + storageReason.key,new int[] {plan[0],plan[1],plan[2]});
-        accessSupplyChecked = accessStationReachable = true;
+            transition(Task.DEPOSITING,"at storage: " + storageReason.key,depot);
+        checkAccessStation();
         long beforeSupplies = supplyStamp();
         equipCarriedTool();
         stockTorchesFromCargo();
-        // Retain precisely the materials reserved for the interrupted construction.
-        // Otherwise a missing-ladder wait deposits and withdraws the same backing
-        // blocks on every visit and can mistake its own reserved cargo for full storage.
-        boolean reserveAccess = blockWorkRemaining() || buildingAccess || pendingDrops != null && !pendingDropsCaptured;
-        int keepBlocks = reserveAccess ? Math.max(retainedMaterialRequirement(false),Math.max(supportRequirement(),emergencyBlocks())) : 0;
-        int keepLadders = reserveAccess ? Math.max(retainedMaterialRequirement(true),Math.max(2,Math.max(restockLadders,ladderRequirement()))) : 0;
+        int[] reserved = cargoReservations();
         boolean depositBlocked = false;
-        for (ItemStack stack : cargo) if (stack != null) {
-            int keep = accessMaterial(stack,false) ? Math.min(stack.stackSize,keepBlocks)
-                    : accessMaterial(stack,true) ? Math.min(stack.stackSize,keepLadders) : 0;
-            if (accessMaterial(stack,false)) keepBlocks -= keep;
-            else if (accessMaterial(stack,true)) keepLadders -= keep;
+        for (int i=0; i<cargo.length; i++) { ItemStack stack=cargo[i]; if (stack != null) {
+            int keep = reserved[i];
             stack.stackSize -= keep; insert(chest,stack);
             depositBlocked |= stack.stackSize > 0; stack.stackSize += keep;
-        }
+        } }
         for (int i = 0; i < cargo.length; i++) if (cargo[i] != null && cargo[i].stackSize <= 0) cargo[i] = null;
         for (java.util.Iterator<ItemStack> items = overflowDrops.iterator(); items.hasNext();) {
-            ItemStack stack = items.next(); insert(chest,stack); if (stack.stackSize <= 0) items.remove();
+            ItemStack stack = items.next();
+            if (reserveWorkSupplies() && accessMaterial(stack,true)) insert(this,stack); else insert(chest,stack);
+            if (stack.stackSize <= 0) items.remove();
         }
         chest.markDirty();
-        if (beforeSupplies != supplyStamp()) usefulProgress("deposited real cargo");
-        if (depositBlocked || !overflowDrops.isEmpty()) { status = "storage_full"; supplyCheckTicks = 40; return; }
+        if (beforeSupplies != supplyStamp()) { triedDepots.clear(); usefulProgress("deposited real cargo"); }
+        if (depositBlocked || !depositCargo().isEmpty()) { nextDepot(); return; }
         // New overflow was entirely captured from actual entities. Once it is deposited there
         // is nothing left at that site; legacy coordinate-only saves still need a collection visit.
         if (pendingDropsCaptured) { pendingDrops = null; pendingDropsCaptured = false; }
@@ -4725,13 +4993,14 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             buildingAccess = false; accessPlan.clear(); accessIndex = 0;
             transition(Task.COMPLETE,"final deposit finished",null); stop("complete"); return;
         }
-        transition(Task.RESTOCKING,"deposit finished; check required supplies",new int[] {plan[0],plan[1],plan[2]});
+        transition(Task.RESTOCKING,"deposit finished; check required supplies",depot);
         stockAccess(chest,false); stockAccess(chest,true);
+        if (beforeSupplies != supplyStamp()) triedDepots.clear();
         if (storageReason == StorageReason.LADDERS && accessCount(true) < restockLadders) {
-            status = "no_ladders"; supplyCheckTicks = 40; return;
+            waitForDepotSupplies("no_ladders"); return;
         }
         if (storageReason == StorageReason.ACCESS && accessCount(false) < supportRequirement()) {
-            status = "access_materials"; supplyCheckTicks = 40; return;
+            waitForDepotSupplies("no_supports"); return;
         }
         if (storageReason == StorageReason.LADDERS) {
             restockLadders = restockBlocks = 0; sentLadderReminder = false; repairAfterRestock = true;
@@ -4742,7 +5011,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (miningRemains && !suitable(getHeldItem())) {
             if (getHeldItem() != null) {
                 ItemStack old = getHeldItem(); insert(chest, old);
-                if (old.stackSize > 0) { status = "storage_full"; return; }
+                if (old.stackSize > 0) { waitForDepotSupplies("storage_full"); return; }
                 setCurrentItemOrArmor(0, null);
             }
             for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++) {
@@ -4751,7 +5020,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             }
             if (!suitable(getHeldItem())) {
                 requestedTools = 1; status = requiredHarvest >= 0 ? "tool_level" : "no_tool";
-                supplyCheckTicks = 40; return;
+                waitForDepotSupplies(status); return;
             }
         }
         requestedTools = 0;
@@ -4765,7 +5034,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             chest.markDirty();
         }
         if (miningRemains && needsLight && torchCount() == 0) {
-            requestedTorches = 1; status = "no_torches"; supplyCheckTicks = 40; return;
+            requestedTorches = 1; waitForDepotSupplies("no_torches"); return;
         }
         requestedTorches = 0;
         if (buildingAccess) {
@@ -4781,24 +5050,29 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (!accessOperationComplete(cell) && (cell[3] < 0 || accessCount(cell[3] > 0) > 0)) ready = true;
             }
             if (!ready && (accessCount(false) < accessNeeded(false) || accessCount(true) < accessNeeded(true))) {
-                status = "access_materials"; supplyCheckTicks = 40; return;
+                waitForDepotSupplies(accessCount(false) < accessNeeded(false) ? "no_supports" : "no_ladders"); return;
             }
         }
         if (beforeSupplies != supplyStamp()) usefulProgress("restocked required supplies");
         accessRepairPending = true;
+        triedDepots.clear(); waitingForDepot=false;
         returnToWork("deposit and required restocking finished");
     }
     private void stockAccess(IInventory chest,boolean rung) {
-        for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++) {
+        int preferred=2;
+        if (!rung) for (Depot depot : reachableSupplyDepots) preferred=Math.min(preferred,depotSupportRank(depot));
+        for (int rank=0; rank < (rung ? 1 : 3); rank++) for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++) {
             // Optional reserves may be replenished on an already required visit;
             // only supportRequirement/ladderRequirement can initiate or delay it.
             int need = (rung ? Math.max(2,Math.max(restockLadders,Math.max(ladderRequirement(),accessNeeded(true))))
                     : Math.max(supportRequirement(),emergencyBlocks()))-accessCount(rung);
             if (need <= 0) break;
             ItemStack stack = chest.getStackInSlot(i);
-            if (!accessMaterial(stack,rung)) continue;
+            if (materialRank(stack,rung) != rank) continue;
+            // Only a real shortage can justify another trip. Never exchange usable carried backing for cobble.
+            if (!rung && rank > preferred) continue;
             int amount = Math.min(need,Math.min(stack.stackSize,remainingCapacity(stack)));
-            if (amount <= 0) break;
+            if (amount <= 0) continue;
             ItemStack taken = chest.decrStackSize(i,amount);
             if (taken != null) insert(this,taken);
             chest.markDirty();
@@ -4992,9 +5266,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         requestedTools = requestedTorches = 0;
         requestedBlocks = requestedLadders = 0;
         if (worldObj.isRemote || !configured || !authorized() || jobDimension != dimension) return;
-        if (buildingAccess || restockLadders > 0 || storageReason == StorageReason.ACCESS && storageTask()) {
+        if (buildingAccess || restockLadders > 0 || storageTask()) {
             requestedBlocks = Math.max(0,supportRequirement()-accessCount(false));
-            requestedLadders = Math.max(0,Math.max(restockLadders,accessNeeded(true))-accessCount(true));
+            requestedLadders = Math.max(0,requiredLadders()-accessCount(true));
         }
         int total = (plan[5] - plan[3] + 1) * (plan[6] - plan[4] + 1) * (plan[7] - plan[8] + 1);
         if (!blockWorkRemaining()) return;
@@ -5011,13 +5285,15 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (tool && (!needsLight || lights > 0)) return;
         requestedTools = tool ? 0 : 1;
         requestedTorches = needsLight && lights == 0 ? 1 : 0;
-        IInventory station = stationAssigned && accessSupplyChecked && accessStationReachable ? stationInventory(plan[0], plan[1], plan[2]) : null;
         // An inaccessible/unloaded station is an access problem, not proof of missing supplies.
-        if (station == null) return;
-        for (int i = firstSlot(station); i < station.getSizeInventory(); i++) {
-            ItemStack stack = station.getStackInSlot(i);
-            if (!tool && suitable(stack)) tool = true;
-            if (isTorch(stack)) lights += stack.stackSize;
+        if (!accessSupplyChecked) return;
+        for (Depot depot : reachableSupplyDepots) {
+            IInventory station=depotInventory(depot); if (station == null) continue;
+            for (int i = firstSlot(station); i < station.getSizeInventory(); i++) {
+                ItemStack stack = station.getStackInSlot(i);
+                if (!tool && suitable(stack)) tool = true;
+                if (isTorch(stack)) lights += stack.stackSize;
+            }
         }
         requestedTools = tool ? 0 : 1;
         requestedTorches = needsLight && lights == 0 ? 1 : 0;
@@ -5025,7 +5301,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void notifySupplies() {
         // A local collection/search/repair shortage is diagnostic, not a player
         // request. Notify only after recovery has exhausted its real options.
-        if (!navigationBlocked && task != Task.RESTOCKING && (requestedBlocks > 0 || requestedLadders > 0)) return;
+        if (!navigationBlocked && task != Task.RESTOCKING && !waitingForDepot && (requestedBlocks > 0 || requestedLadders > 0)) return;
         long now = System.nanoTime();
         if (running && restockLadders > 0 && requestedLadders > 0
                 && (!sentLadderReminder || now-lastLadderReminder >= 60000000000L)) {
@@ -5033,7 +5309,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (recipient != null) {
                 recipient.addChatMessage(new ChatComponentTranslation(restockLadders > accessCount(true) ? "xf.miner.ladder_notice" : "xf.miner.escape_notice",
                         getCommandSenderName(),getUniqueID().toString().substring(0,8),
-                        requestedLadders,plan[0]+", "+plan[1]+", "+plan[2],
+                        requestedLadders,Arrays.toString(depotDestination()),
                         new ChatComponentTranslation(task == Task.RESTOCKING ? "xf.miner.waiting_at_station" : "xf.miner.station_not_reached"),
                         navigationBlocked ? accessBlocker : ""));
                 lastLadderReminder = now; sentLadderReminder = true;
@@ -5050,8 +5326,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         ChatComponentTranslation request = requestedTools > 0 ? tool : light;
         if (requestedTools > 0 && requestedTorches > 0) request = new ChatComponentTranslation("xf.miner.both_requests", tool, light);
         if (requestedBlocks > 0 || requestedLadders > 0) {
-            ChatComponentTranslation access = requestedLadders == 0 ? new ChatComponentTranslation("xf.miner.need_blocks",requestedBlocks)
-                    : new ChatComponentTranslation("xf.miner.need_access",requestedBlocks,requestedLadders);
+            ChatComponentTranslation access = requestedBlocks > 0 ? new ChatComponentTranslation("xf.miner.need_blocks",requestedBlocks)
+                    : new ChatComponentTranslation("xf.miner.need_ladders",requestedLadders);
+            if (requestedBlocks > 0 && requestedLadders > 0) access=new ChatComponentTranslation("xf.miner.both_requests",access,
+                    new ChatComponentTranslation("xf.miner.need_ladders",requestedLadders));
             request = requestedTools > 0 || requestedTorches > 0 ? new ChatComponentTranslation("xf.miner.both_requests",request,access) : access;
         }
         recipient.addChatMessage(new ChatComponentTranslation("xf.miner.supply_notice", getCommandSenderName(),
@@ -5069,9 +5347,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return null;
     }
     public NBTTagCompound snapshot() {
+        if (!worldObj.isRemote) normalizeDepots();
         updateRequests();
         NBTTagCompound tag = new NBTTagCompound(); tag.setIntArray("Plan", plan); tag.setBoolean("Configured", configured); tag.setInteger("Dimension", jobDimension);
         tag.setBoolean("StationAssigned", stationAssigned);
+        NBTTagList linked=new NBTTagList();
+        for (Depot depot : depots) {
+            NBTTagCompound entry=new NBTTagCompound(); entry.setInteger("Dimension",depot.dimension); entry.setIntArray("Position",depot.position()); linked.appendTag(entry);
+        }
+        tag.setTag("Depots",linked);
+        if (activeDepot != null) tag.setIntArray("ActiveDepot",new int[] {activeDepot.dimension,activeDepot.x,activeDepot.y,activeDepot.z});
         tag.setBoolean("Down",installedDown);
         tag.setString("TemporaryActivity",temporaryActivity());
         tag.setString("TravelRecoveryPhase",movementRecovery.phase.name());
@@ -5218,6 +5503,22 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int[] saved = job.getIntArray("Plan"); configured = saved.length == PLAN_SIZE && job.getBoolean("Configured");
         if (saved.length == PLAN_SIZE) plan = saved;
         stationAssigned = job.hasKey("StationAssigned") ? job.getBoolean("StationAssigned") : configured;
+        depots.clear(); activeDepot=null; triedDepots.clear(); reachableSupplyDepots.clear(); waitingForDepot=false;
+        if (job.hasKey("Depots",9)) {
+            NBTTagList linked=job.getTagList("Depots",10);
+            for (int i=0; i<Math.min(MAX_DEPOTS,linked.tagCount()); i++) {
+                NBTTagCompound entry=linked.getCompoundTagAt(i); int[] p=entry.getIntArray("Position");
+                if (p.length != 3 || Math.abs((long)p[0]) > 30000000 || Math.abs((long)p[2]) > 30000000 || p[1] < 0 || p[1] >= 256) continue;
+                Depot depot=new Depot(entry.getInteger("Dimension"),p[0],p[1],p[2]);
+                if (!depots.contains(depot)) depots.add(depot);
+            }
+        } else if (stationAssigned) depots.add(new Depot(jobDimension,plan[0],plan[1],plan[2]));
+        // Do not inspect worlds/chunks during deserialization; loaded double chests normalize on use.
+        stationAssigned=!depots.isEmpty();
+        int[] active=job.getIntArray("ActiveDepot");
+        if (active.length == 4) {
+            Depot depot=new Depot(active[0],active[1],active[2],active[3]); if (depots.contains(depot)) activeDepot=depot;
+        } else if (!job.hasKey("Depots",9) && stationAssigned) activeDepot=depots.get(0);
         installedDown = job.hasKey("Down") ? job.getBoolean("Down") : configured && plan[8] == 0;
         accessRamp = configured && job.getBoolean("AccessRamp") && (plan[5] > plan[3] || plan[6] > plan[4]);
         rampOffset = accessRamp ? Math.max(0,job.getInteger("RampOffset")) % rampPerimeter() : 0;

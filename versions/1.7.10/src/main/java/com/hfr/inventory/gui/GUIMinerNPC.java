@@ -114,7 +114,8 @@ public final class GUIMinerNPC extends GuiContainer {
             }
             int[] p = state.getIntArray("Plan"), target = state.getIntArray("Target");
             int blocks = state.getInteger("BlocksRequested"), ladders = state.getInteger("LaddersRequested");
-            if (blocks > 0 || ladders > 0) detail(lines,ladders == 0 ? I18n.format("xf.miner.need_blocks",blocks) : I18n.format("xf.miner.need_access",blocks,ladders));
+            if (blocks > 0) detail(lines,I18n.format("xf.miner.need_blocks",blocks));
+            if (ladders > 0) detail(lines,I18n.format("xf.miner.need_ladders",ladders));
             if ((blocks > 0 || ladders > 0) && state.getBoolean("AccessDirectDelivery")) detail(lines,I18n.format("xf.miner.direct_supplies"));
             if (!state.getString("AccessBlocker").isEmpty()) detail(lines,state.getString("AccessBlocker"));
             if (!state.getString("AccessPlacementFailure").isEmpty()) detail(lines,state.getString("AccessPlacementFailure"));
@@ -137,8 +138,17 @@ public final class GUIMinerNPC extends GuiContainer {
                         : I18n.format("xf.miner.recovery_no_destination"));
                 detail(lines,I18n.format("xf.miner.recovery_attempts",state.getInteger("RecoveryAttempts")));
             }
-            detail(lines,I18n.format("xf.miner.station")+":");
-            detail(lines,state.getBoolean("StationAssigned") ? "D"+state.getInteger("Dimension")+": "+coord(p[0],p[1],p[2]) : I18n.format("xf.miner.no_chest"));
+            net.minecraft.nbt.NBTTagList depots=state.getTagList("Depots",10);
+            detail(lines,I18n.format("xf.miner.depot_count",depots.tagCount()));
+            int[] active=state.getIntArray("ActiveDepot");
+            for (int i=0; i<depots.tagCount(); i++) {
+                NBTTagCompound depot=depots.getCompoundTagAt(i); int[] position=depot.getIntArray("Position");
+                if (position.length != 3) continue;
+                boolean selected=active.length == 4 && active[0] == depot.getInteger("Dimension")
+                        && active[1] == position[0] && active[2] == position[1] && active[3] == position[2];
+                detail(lines,I18n.format(selected ? "xf.miner.depot_active" : "xf.miner.depot_link",depot.getInteger("Dimension"),coord(position[0],position[1],position[2])));
+            }
+            if (depots.tagCount() == 0) detail(lines,I18n.format("xf.miner.no_chest"));
             detail(lines,I18n.format("xf.miner.area")+":");
             if (state.getBoolean("Configured")) {
                 detail(lines,coord(p[3],p[8],p[4])+" >"); detail(lines,coord(p[5],p[7],p[6]));

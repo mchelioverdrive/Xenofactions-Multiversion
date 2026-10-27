@@ -145,7 +145,12 @@ public final class ItemMinerWand extends Item {
         tag.setInteger("Entity",miner.getEntityId());
         ItemMinerWand wand = (ItemMinerWand)held.getItem();
         if (!wand.area) {
-            if (!a) player.addChatMessage(new ChatComponentTranslation(miner.selectStation(player,x,y,z), x,y,z, player.dimension));
+            if (!a) {
+                player.addChatMessage(new ChatComponentTranslation(miner.selectStation(player,x,y,z,down), x,y,z, player.dimension));
+                if (player.openContainer instanceof com.hfr.inventory.container.ContainerMinerNPC
+                        && ((com.hfr.inventory.container.ContainerMinerNPC)player.openContainer).worker == miner)
+                    com.hfr.packet.PacketDispatcher.wrapper.sendTo(new com.hfr.packet.builder.MinerSnapshotPacket(miner,player,"",false),player);
+            }
             return;
         }
         if (!com.hfr.worker.WorkerAccess.ownsLand(player.worldObj,x,z,miner.getFactionId())) {
