@@ -183,6 +183,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private final java.util.Map<Long,Integer> endpointAccess = new java.util.HashMap<Long,Integer>();
     private int[] endpointOrigin;
     private double endpointX, endpointY, endpointZ;
+    private String feetRejection = "";
     private int[] accessSearchTarget;
     private List<List<int[]>> accessProposals;
     private final java.util.Map<List<int[]>,int[]> staircaseLayouts = new java.util.IdentityHashMap<List<int[]>,int[]>();
@@ -280,7 +281,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         if (debugHistory == null) lines.add("Tracing is off; enable before reproducing to record decisions (maximum 200 events).");
         else for (String event : debugHistory) if (!movementOnly || event.contains("[movement]") || event.contains("[objective]")
-                || event.contains("[recovery]") || event.contains("[progress]")) lines.add(event);
+                || event.contains("[recovery]") || event.contains("[progress]") || event.contains("[endpoint]")) lines.add(event);
         return lines;
     }
     /** Read observations only: no planners, fake player, events, watches or chunk requests. */
@@ -1447,6 +1448,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 || atPreciseNode(selectedEndpoint,ladderNode(selectedEndpoint));
     }
     private String interactionFailure(double px,double py,double pz,int x,int y,int z,boolean mining,boolean actual) {
+        return interactionFailure(px,py,pz,x,y,z,mining,actual,null);
+    }
+    private String interactionFailure(double px,double py,double pz,int x,int y,int z,boolean mining,boolean actual,StringBuilder detail) {
         if (!inCorridor((int)Math.floor(px),(int)Math.floor(pz))) return "outside";
         if (!worldObj.blockExists(x,mining ? y-1 : y,z)) return "chunk";
         if (mining && actual && interactionTarget != null && Arrays.equals(interactionTarget,new int[] {x,y,z})
@@ -1457,7 +1461,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (Math.abs(py-y) > 3) return "elevation";
         if ((px-x-.5)*(px-x-.5)+(py-y)*(py-y)+(pz-z-.5)*(pz-z-.5) > 9) return "reach";
         int rx = mining ? x : -30000001, ry = mining ? y-1 : -1;
-        if (!clearBody(px,py,pz,rx,ry,z) || !clearBody(px,py,pz,-30000001,-1,0)) return "clearance";
+        if (!clearBody(px,py,pz,rx,ry,z,detail) || !clearBody(px,py,pz,-30000001,-1,0,detail)) return "clearance";
         if (!mining && buildingAccess && task != Task.ESCAPE && accessIndex < accessPlan.size()) {
             int[] cell = accessPlan.get(accessIndex);
             if (cell[0] == x && cell[1] == y && cell[2] == z && accessShape(cell).intersectsWith(body(px,py,pz))) return "clearance";
@@ -1471,9 +1475,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (!support) return "footing";
         }
         if (actual && !onGround && !climb) return "movement";
-        if (mining && !sight(px,py+getEyeHeight(),pz,x,y-1,z)) return "sight";
+        if (mining && !sight(px,py+getEyeHeight(),pz,x,y-1,z,detail)) return "sight";
         if (mining && !fallingSafe(x,y-1,z,px,py,pz)) return "falling_terrain";
-        if (!mining && !sight(px,py+getEyeHeight(),pz,x,y,z)) return "sight";
+        if (!mining && !sight(px,py+getEyeHeight(),pz,x,y,z,detail)) return "sight";
         return "";
     }
     private void rememberInteraction(int x,int y,int z,boolean mining) {
@@ -1630,7 +1634,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                     : standingCandidates(x,y,z,mining);
             if (!recovery && goals.isEmpty()) {
                 navigationReason = failedEndpoints.isEmpty() ? "standing" : arrivalFailure;
-                navigationDetail = failedEndpoints.isEmpty() ? standingObstruction(x,y,z) : endpointDiagnostic(arrivalFailure);
+                navigationDetail = failedEndpoints.isEmpty() ? standingObstruction(x,y,z,mining) : endpointDiagnostic(arrivalFailure);
             }
             else {
                 // Search complete routes first, including direct approaches; a verified cached
@@ -1700,17 +1704,25 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (filterFailures && failedEndpoints.contains(positionKey(sx,sy,sz)) && Arrays.equals(interactionTarget,new int[] {x,y,z})) continue;
             double fy = feet(sx,sy,sz,mining ? x : -30000001,mining ? y-1 : -1,z);
             if (Double.isNaN(fy)) continue;
-            if (interaction ? !interactionFailure(sx+.5,fy,sz+.5,x,y,z,mining,false).isEmpty()
-                    : !inCorridor(sx,sz) || dx*dx+(fy-y)*(fy-y)+dz*dz > 9
-                        || !solidFooting(sx+.5,fy,sz+.5,mining ? x : -30000001,mining ? y-1 : -1,z)) continue;
-            // A different floor exposed by removal is not the position we can
-            // occupy before harvesting. Choose another supported endpoint.
-            double before = mining ? feet(sx,sy,sz,-30000001,-1,0) : fy;
-            if (Double.isNaN(before) || Math.abs(fy-before) > .06) continue;
+            if (!candidateFailure(sx,sy,sz,fy,x,y,z,mining,interaction,null).isEmpty()) continue;
             result.add(new int[] {sx,sy,sz});
         }
         java.util.Collections.sort(result,(a,b) -> Double.compare(getDistanceSq(a[0]+.5,a[1],a[2]+.5),getDistanceSq(b[0]+.5,b[1],b[2]+.5)));
         return result;
+    }
+    private String candidateFailure(int sx,int sy,int sz,double fy,int x,int y,int z,boolean mining,boolean interaction,StringBuilder detail) {
+        if (interaction) {
+            String failure = interactionFailure(sx+.5,fy,sz+.5,x,y,z,mining,false,detail);
+            if (!failure.isEmpty()) return failure;
+        } else {
+            if (!inCorridor(sx,sz)) return "outside";
+            if ((sx-x)*(sx-x)+(fy-y)*(fy-y)+(sz-z)*(sz-z) > 9) return "reach";
+            if (!solidFooting(sx+.5,fy,sz+.5,mining ? x : -30000001,mining ? y-1 : -1,z)) return "footing";
+        }
+        // Post-removal footing cannot authorize occupying an obstruction first.
+        double before = mining ? detail == null ? feet(sx,sy,sz,-30000001,-1,0)
+                : computeFeet(sx,sy,sz,-30000001,-1,0,detail) : fy;
+        return Double.isNaN(before) ? "pre_edit_position" : Math.abs(fy-before) > .06 ? "pre_edit_footing" : "";
     }
     private List<int[]> workPositions() {
         int[] goal = accessSearchTarget != null ? accessSearchTarget
@@ -1765,25 +1777,40 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     /** Loaded block collision shapes only: World.getCollidingBoundingBoxes also scans entities/chunks. */
     private boolean collisions(AxisAlignedBB box,int rx,int ry,int rz,List<AxisAlignedBB> result,boolean dry) {
+        return collisions(box,rx,ry,rz,result,dry,null);
+    }
+    private boolean collisions(AxisAlignedBB box,int rx,int ry,int rz,List<AxisAlignedBB> result,boolean dry,StringBuilder detail) {
         result.clear();
         for (int x = (int)Math.floor(box.minX); x <= (int)Math.floor(box.maxX); x++)
             for (int z = (int)Math.floor(box.minZ); z <= (int)Math.floor(box.maxZ); z++)
                 for (int y = Math.max(0,(int)Math.floor(box.minY)-1); y <= Math.min(worldObj.getHeight()-1,(int)Math.floor(box.maxY)); y++) {
                     watchTerrain(x,y,z);
-                    if (!worldObj.blockExists(x,y,z)) return false;
+                    if (!worldObj.blockExists(x,y,z)) {
+                        if (detail != null) detail.append(" unloaded=").append(x).append(',').append(y).append(',').append(z);
+                        return false;
+                    }
                     Block block = routeBlock(x,y,z,rx,ry,rz);
-                    if (dry && y+1 > box.minY && block.getMaterial().isLiquid()) return false;
+                    if (dry && y+1 > box.minY && block.getMaterial().isLiquid()) {
+                        if (detail != null) detail.append(" liquid=").append(blockDescription(x,y,z));
+                        return false;
+                    }
+                    int before = result.size();
                     int[] p = proposedAccess.get(positionKey(x,y,z));
                     if (p != null && !(x == rx && y == ry && z == rz)) {
                         if (p[3] < 0) continue;
                         AxisAlignedBB shape = accessShape(p);
                         if (shape.intersectsWith(box)) result.add(shape);
                     } else block.addCollisionBoxesToList(worldObj,x,y,z,box,result,this);
+                    if (detail != null && before == 0 && !result.isEmpty()) detail.append(" collision=").append(blockDescription(x,y,z))
+                            .append(" shape=").append(result.get(0));
                 }
         return true;
     }
     private boolean clearBody(double x,double y,double z,int rx,int ry,int rz) {
-        return collisions(body(x,y,z),rx,ry,rz,recoveryCollisions,true) && recoveryCollisions.isEmpty();
+        return clearBody(x,y,z,rx,ry,rz,null);
+    }
+    private boolean clearBody(double x,double y,double z,int rx,int ry,int rz,StringBuilder detail) {
+        return collisions(body(x,y,z),rx,ry,rz,recoveryCollisions,true,detail) && recoveryCollisions.isEmpty();
     }
     private boolean supported(double x,double y,double z,int rx,int ry,int rz) {
         if (ladder((int)Math.floor(x),(int)Math.floor(y),(int)Math.floor(z),rx,ry,rz)) return true;
@@ -1850,14 +1877,29 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return value;
     }
     private double computeFeet(int x,int y,int z,int rx,int ry,int rz) {
-        if (y < 0 || y+1 >= worldObj.getHeight() || !recoveryCellLoaded(x,y,z)) return Double.NaN;
-        if (ladder(x,y,z,rx,ry,rz) && clearBody(x+.5,y,z+.5,rx,ry,rz)) return y;
+        return computeFeet(x,y,z,rx,ry,rz,null);
+    }
+    private double computeFeet(int x,int y,int z,int rx,int ry,int rz,StringBuilder detail) {
+        feetRejection = "";
+        if (y < 0 || y+1 >= worldObj.getHeight() || !recoveryCellLoaded(x,y,z)) { feetRejection = "chunk"; return Double.NaN; }
+        boolean attached = ladder(x,y,z,rx,ry,rz);
+        if (attached && clearBody(x+.5,y,z+.5,rx,ry,rz,detail)) return y;
         AxisAlignedBB probe = AxisAlignedBB.getBoundingBox(x+.5-width/2,y-.01,z+.5-width/2,x+.5+width/2,y+1,z+.5+width/2);
-        if (!collisions(probe,rx,ry,rz,recoveryCollisions,false)) return Double.NaN;
+        if (!collisions(probe,rx,ry,rz,recoveryCollisions,false)) { feetRejection = "chunk"; return Double.NaN; }
         double top = Double.NaN;
         for (AxisAlignedBB shape : recoveryCollisions)
             if (shape.maxY >= y-.001 && shape.maxY < y+1-.001 && (Double.isNaN(top) || shape.maxY > top)) top = shape.maxY;
-        return !Double.isNaN(top) && clearBody(x+.5,top,z+.5,rx,ry,rz) ? top : Double.NaN;
+        if (Double.isNaN(top)) {
+            feetRejection = attached || !recoveryCollisions.isEmpty() ? "clearance"
+                    : routeBlock(x,y,z,rx,ry,rz).isLadder(worldObj,x,y,z,this) ? "attachment" : "footing";
+            if (detail != null) {
+                detail.append(" footingProbe=").append(probe).append(" below=").append(blockDescription(x,Math.max(0,y-1),z));
+                if (!attached) clearBody(x+.5,y,z+.5,rx,ry,rz,detail);
+            }
+            return Double.NaN;
+        }
+        if (clearBody(x+.5,top,z+.5,rx,ry,rz,detail)) return top;
+        feetRejection = "clearance"; return Double.NaN;
     }
     private double nodeY(int[] p) { return feet(p[0],p[1],p[2],-30000001,-1,0); }
     private Movement movement(int[] a,int[] b) {
@@ -1867,20 +1909,32 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         return dy > .01 ? Movement.STEP : dy < -.01 ? Movement.DESCEND : Movement.WALK;
     }
     private boolean sight(double sx,double sy,double sz,int x,int y,int z) {
+        return sight(sx,sy,sz,x,y,z,null);
+    }
+    private boolean sight(double sx,double sy,double sz,int x,int y,int z,StringBuilder detail) {
         for (int cx = Math.min((int)Math.floor(sx),x)>>4; cx <= (Math.max((int)Math.floor(sx),x)>>4); cx++)
             for (int cz = Math.min((int)Math.floor(sz),z)>>4; cz <= (Math.max((int)Math.floor(sz),z)>>4); cz++)
                 if (!worldObj.blockExists(cx<<4,y,cz<<4)) return false;
         net.minecraft.util.Vec3 start = net.minecraft.util.Vec3.createVectorHelper(sx,sy,sz);
         net.minecraft.util.Vec3 end = net.minecraft.util.Vec3.createVectorHelper(x+.5,y+.5,z+.5);
         for (int[] p : proposedAccess.values()) if (p[3] >= 0 && !(p[0] == x && p[1] == y && p[2] == z)
-                && accessShape(p).calculateIntercept(start,end) != null) return false;
+                && accessShape(p).calculateIntercept(start,end) != null) {
+            if (detail != null) detail.append(" rayProposedHit=").append(Arrays.toString(p)).append(" shape=").append(accessShape(p));
+            return false;
+        }
         // The world's ray tracer cannot see planned harvesting. Skip only cells
         // explicitly authorized as clearance in this proposal; all other hits count.
         for (int attempt = 0; attempt < 16; attempt++) {
             net.minecraft.util.MovingObjectPosition hit = worldObj.func_147447_a(start,end,false,true,false);
             if (hit == null || hit.blockX == x && hit.blockY == y && hit.blockZ == z) return true;
             int[] cleared = proposedAccess.get(positionKey(hit.blockX,hit.blockY,hit.blockZ));
-            if (cleared == null || cleared[3] >= 0) return false;
+            if (cleared == null || cleared[3] >= 0) {
+                if (detail != null) detail.append(" rayHit=").append(blockDescription(hit.blockX,hit.blockY,hit.blockZ))
+                        .append(" face=").append(hit.sideHit).append(" at=").append(hit.hitVec)
+                        .append(" shape=").append(worldObj.getBlock(hit.blockX,hit.blockY,hit.blockZ)
+                                .getCollisionBoundingBoxFromPool(worldObj,hit.blockX,hit.blockY,hit.blockZ));
+                return false;
+            }
             double dx = end.xCoord-start.xCoord, dy = end.yCoord-start.yCoord, dz = end.zCoord-start.zCoord;
             double exit = Math.min(dx == 0 ? Double.POSITIVE_INFINITY : ((dx > 0 ? hit.blockX+1 : hit.blockX)-start.xCoord)/dx,
                     Math.min(dy == 0 ? Double.POSITIVE_INFINITY : ((dy > 0 ? hit.blockY+1 : hit.blockY)-start.yCoord)/dy,
@@ -2453,10 +2507,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 || ladderPosition != null && p[0] == ladderPosition[0] && p[2] == ladderPosition[1]
                         && accessPresent(new int[] {p[0],p[1],p[2],ladderPosition[2]});
         if (p[3] == 0 && ladderPosition != null) {
-            if (routeBlock(p[0],p[1],p[2],-30000001,-1,0) instanceof net.minecraft.block.BlockFalling) return false;
             net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(ladderPosition[2]);
             if (p[0] == ladderPosition[0]-d.offsetX && p[2] == ladderPosition[1]-d.offsetZ)
-                return solidAttachment(p[0],p[1],p[2],d,-30000001,-1,0);
+                return solidAttachment(p[0],p[1],p[2],d,-30000001,-1,0) && stableBacking(p[0],p[1],p[2]);
+            if (routeBlock(p[0],p[1],p[2],-30000001,-1,0) instanceof net.minecraft.block.BlockFalling) return false;
             if (ladderLanding != null && p[0] == ladderLanding[0] && p[1] == ladderLanding[1]-1 && p[2] == ladderLanding[2])
                 return solidFooting(ladderLanding[0]+.5,ladderLanding[1],ladderLanding[2]+.5,-30000001,-1,0);
         }
@@ -2466,6 +2520,22 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                         && (proposedAccess.containsKey(positionKey(p[0],p[1],p[2])) ? proposedAccess.get(positionKey(p[0],p[1],p[2]))[3]
                                 : worldObj.getBlockMetadata(p[0],p[1],p[2])) == p[3]
                         && ladder(p[0],p[1],p[2],-30000001,-1,0);
+    }
+    /** Existing sand is valid backing when its entire loaded column rests on
+     * solid terrain. Replacing it behind intact rungs would first require a
+     * sight line through those rungs. New placement anchors still exclude sand.
+     * Consult the overlay too: a proposed removal must not retain this proof. */
+    private boolean stableBacking(int x,int y,int z) {
+        if (!(routeBlock(x,y,z,-30000001,-1,0) instanceof net.minecraft.block.BlockFalling)) return true;
+        for (int h = y-1; h >= 0; h--) {
+            watchTerrain(x,h,z);
+            if (!worldObj.blockExists(x,h,z)) return false;
+            Block block = routeBlock(x,h,z,-30000001,-1,0);
+            if (!(block instanceof net.minecraft.block.BlockFalling))
+                return solidAttachment(x,h,z,net.minecraftforge.common.util.ForgeDirection.UP,-30000001,-1,0);
+            if (h == 0) return false;
+        }
+        return false;
     }
     private boolean rungPresent(int[] p) {
         return p[3] > 0 && worldObj.blockExists(p[0],p[1],p[2])
@@ -2860,7 +2930,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (stairs && !retainedTarget) {
                     List<int[]> goals = standingCandidates(x,y,z,true);
                     if (goals.isEmpty()) {
-                        navigationReason = "standing"; accessFailure("work_position",null,standingObstruction(x,y,z)); return true;
+                        navigationReason = "standing"; accessFailure("work_position",null,standingObstruction(x,y,z,true)); return true;
                     }
                     approach = executableRoute(goals,x,y,z,true);
                     if (approach == null) {
@@ -3456,7 +3526,12 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             localRecoveryCell = localRecoveryMove = null; localRecoveryEdits.clear();
             resetPath(); clearRouteSearch(); failedEndpoints.clear(); return;
         }
-        failedAccessOperations.add(cell);
+        int[] prerequisite = unfinishedAccessPrerequisite(cell);
+        // A dependency wait is not an exhausted endpoint or movement attempt.
+        // Actual placement/harvest progress clears endpoint failures below.
+        if (prerequisite == null) failedAccessOperations.add(cell);
+        else if (debugHistory != null) trace("construction","pending " + Arrays.toString(cell)
+                + "; unfinished prerequisite=" + Arrays.toString(prerequisite));
         String failedReason = navigationReason, failedDetail = navigationDetail, failedBlocker = accessBlocker;
         resetPath(); clearRouteSearch(); interactionTarget = selectedEndpoint = null; failedEndpoints.clear();
         for (int i = accessIndex+1; i < accessPlan.size(); i++) if (!accessOperationComplete(accessPlan.get(i))
@@ -3490,13 +3565,23 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private boolean clearanceOrderAllows(int[] cell) {
         if (staircaseAccess || task == Task.ESCAPE || cell[3] < 0) return true;
-        for (int[] p : accessPlan) if (p[3] < 0 && p[0] == cell[0] && p[2] == cell[2]
-                && (p[1] == cell[1] || cell[3] > 0 && p[1] == cell[1]+1) && !accessOperationComplete(p)) return false;
+        if (unfinishedAccessPrerequisite(cell) != null) return false;
         if (cell[3] > 0) {
             net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(cell[3]);
             return solidAttachment(cell[0]-d.offsetX,cell[1],cell[2]-d.offsetZ,d,-30000001,-1,0);
         }
         return true;
+    }
+    private int[] unfinishedAccessPrerequisite(int[] cell) {
+        if (staircaseAccess || task == Task.ESCAPE || cell[3] < 0) return null;
+        for (int[] p : accessPlan) if (p[3] < 0 && p[0] == cell[0] && p[2] == cell[2]
+                && (p[1] == cell[1] || cell[3] > 0 && p[1] == cell[1]+1) && !accessOperationComplete(p)) return p;
+        if (cell[3] > 0) {
+            net.minecraftforge.common.util.ForgeDirection d = net.minecraftforge.common.util.ForgeDirection.getOrientation(cell[3]);
+            for (int[] p : accessPlan) if (p[3] == 0 && p[0] == cell[0]-d.offsetX && p[1] == cell[1]
+                    && p[2] == cell[2]-d.offsetZ && !accessOperationComplete(p)) return p;
+        }
+        return null;
     }
     private boolean accessOperationComplete(int[] cell) {
         if (accessPresent(cell)) return true;
@@ -4406,13 +4491,42 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return false;
     }
-    private String standingObstruction(int x,int y,int z) {
+    private String blockDescription(int x,int y,int z) {
+        return x+","+y+","+z + "=" + (y < 0 || y >= worldObj.getHeight() || !worldObj.blockExists(x,y,z)
+                ? "unloaded" : Block.blockRegistry.getNameForObject(worldObj.getBlock(x,y,z)) + ":" + worldObj.getBlockMetadata(x,y,z));
+    }
+    private String standingObstruction(int x,int y,int z,boolean mining) {
         java.util.Map<String,Integer> failures = new java.util.TreeMap<String,Integer>();
+        int samples = 0;
+        int[] from = {(int)Math.floor(posX),(int)Math.floor(boundingBox.minY+.001),(int)Math.floor(posZ)};
         for (int dx = -3; dx <= 3; dx++) for (int dz = -3; dz <= 3; dz++) for (int dy = -3; dy <= 3; dy++) {
-            if (dx*dx+dy*dy+dz*dz > 9) continue;
-            double fy = feet(x+dx,y+dy,z+dz,x,y-1,z);
-            String failure = Double.isNaN(fy) ? "footing/clearance/attachment" : interactionFailure(x+dx+.5,fy,z+dz+.5,x,y,z,true,false);
+            // Exactly the same enumeration and predicates as standingCandidates.
+            if (dx*dx+dz*dz > 9) continue;
+            int sx = x+dx, sy = y+dy, sz = z+dz;
+            int horizontal = Math.abs(sx-from[0])+Math.abs(sz-from[2]);
+            boolean relevant = (horizontal == 0 || horizontal == 1 && sy == from[1]) && Math.abs(sy-from[1]) <= 3;
+            StringBuilder detail = debugHistory != null && relevant && samples < 8 ? new StringBuilder() : null;
+            double fy = computeFeet(sx,sy,sz,mining ? x : -30000001,mining ? y-1 : -1,z,detail);
+            String failure = Double.isNaN(fy) ? feetRejection : candidateFailure(sx,sy,sz,fy,x,y,z,mining,true,detail);
             if (!failure.isEmpty()) failures.put(failure,failures.containsKey(failure) ? failures.get(failure)+1 : 1);
+            if (!failure.isEmpty() && detail != null) {
+                int[] candidate = {sx,sy,sz};
+                String attachment = "solid footing at feet";
+                Block block = worldObj.blockExists(sx,sy,sz) ? worldObj.getBlock(sx,sy,sz) : net.minecraft.init.Blocks.air;
+                if (block instanceof net.minecraft.block.BlockLadder) {
+                    int meta = worldObj.getBlockMetadata(sx,sy,sz);
+                    net.minecraftforge.common.util.ForgeDirection face = net.minecraftforge.common.util.ForgeDirection.getOrientation(meta);
+                    attachment = "ladder face=" + meta + " backing=" + blockDescription(sx-face.offsetX,sy,sz-face.offsetZ);
+                }
+                int[] operation = constructionCell(x,y,z);
+                trace("endpoint","candidate=" + Arrays.toString(candidate) + " movement=" + movement(from,candidate)
+                        + " failed=" + failure + " body=" + body(sx+.5,Double.isNaN(fy) ? sy : fy,sz+.5)
+                        + " requires=" + attachment + " interaction=" + x+","+y+","+z
+                        + " blockTarget=" + x+","+(mining ? y-1 : y)+","+z + " reach=3 distance="
+                        + Math.sqrt(dx*dx+Math.pow((Double.isNaN(fy) ? sy : fy)-y,2)+dz*dz)
+                        + " prerequisite=" + Arrays.toString(operation == null ? null : unfinishedAccessPrerequisite(operation)) + detail);
+                samples++;
+            }
         }
         return "Endpoint candidates near " + x+","+y+","+z + ": " + failures;
     }

@@ -206,7 +206,7 @@ Requires operator permission level 3. `<id>` accepts the existing miner UUID (ta
 | `/xminerdebug <id> movement` | Targets, completions, reversals since useful work and the decisions that selected movement. |
 | `/xminerdebug <id> inspect <x> <y> <z>` | Read a loaded block and recorded access requirements; no chunk loading, simulation or edits. |
 
-Tracing is disabled by default and not persisted. Enable it before reproducing; reports without tracing still show current diagnostic fields. Changes internal to protection mods may need the miner's existing Start/Resume action after the permission is corrected.
+Tracing is disabled by default and not persisted. Enable it before reproducing; reports without tracing still show current diagnostic fields. Endpoint failures separate footing, body clearance and ladder attachment. With tracing enabled, each exhausted endpoint search records at most eight nearby rejected candidates, including coordinates, movement type, failed predicate, collision bounds or sight-ray hit, required footing/attachment, interaction target/reach and any direct unfinished construction prerequisite. These use the same candidate predicates as planning; a rejected endpoint is not a failed movement attempt. Changes internal to protection mods may need the miner's existing Start/Resume action after the permission is corrected.
 
 ## Utility and moderation commands
 
