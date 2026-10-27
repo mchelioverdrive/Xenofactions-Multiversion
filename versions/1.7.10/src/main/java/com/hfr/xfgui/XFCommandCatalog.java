@@ -66,6 +66,11 @@ public final class XFCommandCatalog { private static final List<XFCommandDefinit
  add("xwallart",Category.UTILITIES,"xwallart",null,"/xwallart",false,0,null,null);
  add("xrewards_collect",Category.UTILITIES,"xrewards","collect","chatreward.hfr.collect_usage",false,0,null,null);
  add("stonedrop_add",Category.ADMIN,"stonedrop",null,"/stonedrop <rarity>",true,4,null,null,a("xf.arg.rarity",Type.DECIMAL,true));
+ add("xminerdebug_on",Category.ADMIN,"xminerdebug",null,"/xminerdebug <id> on",false,3,null,null,a("xf.arg.miner_id",Type.OPTIONAL_TEXT,true),new XFCommandArgument("xf.arg.miner_debug_action",Type.ENUM,true,false,"on"));
+ add("xminerdebug_off",Category.ADMIN,"xminerdebug",null,"/xminerdebug <id> off",false,3,null,null,a("xf.arg.miner_id",Type.OPTIONAL_TEXT,true),new XFCommandArgument("xf.arg.miner_debug_action",Type.ENUM,true,false,"off"));
+ add("xminerdebug_report",Category.ADMIN,"xminerdebug",null,"/xminerdebug <id> report",false,3,null,null,a("xf.arg.miner_id",Type.OPTIONAL_TEXT,true),new XFCommandArgument("xf.arg.miner_debug_action",Type.ENUM,true,false,"report"));
+ add("xminerdebug_movement",Category.ADMIN,"xminerdebug",null,"/xminerdebug <id> movement",false,3,null,null,a("xf.arg.miner_id",Type.OPTIONAL_TEXT,true),new XFCommandArgument("xf.arg.miner_debug_action",Type.ENUM,true,false,"movement"));
+ add("xminerdebug_inspect",Category.ADMIN,"xminerdebug",null,"/xminerdebug <id> inspect <x> <y> <z>",false,3,null,null,a("xf.arg.miner_id",Type.OPTIONAL_TEXT,true),new XFCommandArgument("xf.arg.miner_debug_action",Type.ENUM,true,false,"inspect"),a("xf.arg.block_x",Type.INTEGER,true),a("xf.arg.block_y",Type.INTEGER,true),a("xf.arg.block_z",Type.INTEGER,true));
  add("stonedrop_add_range",Category.ADMIN,"stonedrop",null,"/stonedrop <rarity> <minY> <maxY>",true,4,null,null,a("xf.arg.rarity",Type.DECIMAL,true),a("xf.arg.min_y",Type.INTEGER,true),a("xf.arg.max_y",Type.INTEGER,true));
  add("stonedrop_list",Category.ADMIN,"stonedrop","list","/stonedrop list",false,4,null,null);
  add("stonedrop_remove",Category.ADMIN,"stonedrop","remove","/stonedrop remove <index>",true,4,null,null,a("xf.arg.index",Type.INTEGER,true));

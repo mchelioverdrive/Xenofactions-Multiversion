@@ -194,6 +194,20 @@ Usage: `/cc [public|faction|alliance|mute|unmute]`; permission level: 0. Send me
 
 `clowder_faction_creation_cooldowns.json` stores UUID-keyed faction creation cooldown expirations plus last-known player names and fallback name entries for unresolved offline members. Expired entries are ignored/cleaned on load or lookup.
 
+## Miner diagnostics: `/xminerdebug`
+
+Requires operator permission level 3. `<id>` accepts the existing miner UUID (tab completion) or its current entity ID; the miner must be loaded in the sender's dimension. Output includes both identifiers. This is separate from the public `/xdebug` command.
+
+| Command | Output/action |
+| --- | --- |
+| `/xminerdebug <id> on` | Enable a transient history of up to 200 meaningful decisions. |
+| `/xminerdebug <id> off` | Disable tracing and clear the history. |
+| `/xminerdebug <id> report` | State, retained objective, supplies, construction/recovery failures and history. |
+| `/xminerdebug <id> movement` | Targets, completions, reversals since useful work and the decisions that selected movement. |
+| `/xminerdebug <id> inspect <x> <y> <z>` | Read a loaded block and recorded access requirements; no chunk loading, simulation or edits. |
+
+Tracing is disabled by default and not persisted. Enable it before reproducing; reports without tracing still show current diagnostic fields. Changes internal to protection mods may need the miner's existing Start/Resume action after the permission is corrected.
+
 ## Utility and moderation commands
 
 | Command | Permission | Purpose |

@@ -691,6 +691,7 @@ public class MainRegistry
 		event.registerServerCommand(new CommandXShop());
 		event.registerServerCommand(new CommandXPlayer());
 		event.registerServerCommand(new CommandXDebug());
+        event.registerServerCommand(new com.hfr.command.CommandXMinerDebug());
 
 		event.registerServerCommand(new CommandStoneDrop());
 		MuteManager.init();
