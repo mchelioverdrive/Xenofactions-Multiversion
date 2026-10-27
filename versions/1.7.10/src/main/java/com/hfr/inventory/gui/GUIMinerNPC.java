@@ -98,6 +98,13 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
+            int[] savedObjective = state.getIntArray("SavedWorkObjective"), taskDestination = state.getIntArray("TaskDestination"), temporary = state.getIntArray("TemporaryObjective");
+            if (savedObjective.length == 3) detail(lines,I18n.format("xf.miner.saved_objective",coord(savedObjective[0],savedObjective[1],savedObjective[2])));
+            if (taskDestination.length == 3) detail(lines,I18n.format("xf.miner.task_destination",coord(taskDestination[0],taskDestination[1],taskDestination[2])));
+            detail(lines,I18n.format("xf.miner.temporary_activity",I18n.format("xf.miner.activity."+state.getString("TemporaryActivity"))));
+            if (temporary.length == 3) detail(lines,I18n.format("xf.miner.temporary_objective",coord(temporary[0],temporary[1],temporary[2])));
+            detail(lines,I18n.format("xf.miner.travel_recovery",I18n.format("xf.miner.travel_recovery."+state.getString("TravelRecoveryPhase"))));
+            if (state.getInteger("RetainedBlocks") > 0) detail(lines,I18n.format("xf.miner.retained_blocks",state.getInteger("RetainedBlocks")));
             if (!state.getString("RecoveryAction").isEmpty()) {
                 detail(lines,I18n.format("xf.miner.local_recovery",I18n.format("xf.miner.recovery."+state.getString("RecoveryAction")),
                         state.getInteger("RecoveryBlocksShort"),state.getInteger("RecoveryLaddersShort")));
@@ -120,9 +127,6 @@ public final class GUIMinerNPC extends GuiContainer {
             if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
             int[] workFloor = state.getIntArray("WorkPosition");
             if (workFloor.length == 3) detail(lines,I18n.format("xf.miner.work_floor",coord(workFloor[0],workFloor[1],workFloor[2])));
-            int[] escape = state.getIntArray("EscapeDestination"), pillar = state.getIntArray("EscapePillar");
-            if (escape.length == 3) detail(lines,I18n.format("xf.miner.escape_destination",coord(escape[0],escape[1],escape[2])));
-            if (pillar.length == 4) detail(lines,I18n.format("xf.miner.escape_pillar",coord(pillar[0],pillar[1],pillar[2]),pillar[3]));
             if (state.getInteger("RestockLadders") > 0) detail(lines,I18n.format("xf.miner.ladder_restock",state.getInteger("LaddersCarried"),state.getInteger("RestockLadders")));
             detail(lines,I18n.format("xf.miner.access_materials",state.getInteger("BlocksCarried"),state.getInteger("LaddersCarried"),state.getInteger("EmergencyBlocks")));
             if (state.getBoolean("RepairAfterRestock")) detail(lines,I18n.format("xf.miner.repair_after_restock"));
