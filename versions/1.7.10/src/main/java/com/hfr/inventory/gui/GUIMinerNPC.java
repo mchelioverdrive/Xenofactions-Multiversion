@@ -98,6 +98,16 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
+            if (!"none".equals(state.getString("StorageReason")))
+                detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
+            detail(lines,I18n.format("xf.miner.support_requirement",state.getInteger("BlocksCarried"),state.getInteger("SupportsRequired"),state.getInteger("SupportsMissing")));
+            detail(lines,I18n.format("xf.miner.ladder_requirement",state.getInteger("LaddersCarried"),state.getInteger("LaddersRequired"),state.getInteger("LaddersMissing")));
+            if (!state.getString("DepotFailureDetail").isEmpty()) detail(lines,state.getString("DepotFailureDetail"));
+            int[] supplyOperation = state.getIntArray("SupplyOperation");
+            if (supplyOperation.length == 4) detail(lines,I18n.format("xf.miner.supply_operation",
+                    coord(supplyOperation[0],supplyOperation[1],supplyOperation[2]),I18n.format(supplyOperation[3] < 0 ? "xf.miner.operation.clearance"
+                            : supplyOperation[3] == 0 ? "xf.miner.operation.support" : "xf.miner.operation.ladder")));
+            if (!state.getString("SupplyBlocker").isEmpty()) detail(lines,state.getString("SupplyBlocker"));
             int[] savedObjective = state.getIntArray("SavedWorkObjective"), taskDestination = state.getIntArray("TaskDestination"), temporary = state.getIntArray("TemporaryObjective");
             if (savedObjective.length == 3) detail(lines,I18n.format("xf.miner.saved_objective",coord(savedObjective[0],savedObjective[1],savedObjective[2])));
             if (taskDestination.length == 3) detail(lines,I18n.format("xf.miner.task_destination",coord(taskDestination[0],taskDestination[1],taskDestination[2])));
@@ -128,8 +138,8 @@ public final class GUIMinerNPC extends GuiContainer {
             if (target.length == 3) detail(lines,I18n.format("xf.miner.work_target",coord(target[0],target[1],target[2])));
             int[] workFloor = state.getIntArray("WorkPosition");
             if (workFloor.length == 3) detail(lines,I18n.format("xf.miner.work_floor",coord(workFloor[0],workFloor[1],workFloor[2])));
-            if (state.getInteger("RestockLadders") > 0) detail(lines,I18n.format("xf.miner.ladder_restock",state.getInteger("LaddersCarried"),state.getInteger("RestockLadders")));
-            detail(lines,I18n.format("xf.miner.access_materials",state.getInteger("BlocksCarried"),state.getInteger("LaddersCarried"),state.getInteger("EmergencyBlocks")));
+            detail(lines,I18n.format("xf.miner.plan_materials",state.getInteger("PlanSupports"),state.getInteger("PlanLadders")));
+            detail(lines,I18n.format("xf.miner.optional_reserves",state.getInteger("EmergencyBlocks")));
             if (state.getBoolean("RepairAfterRestock")) detail(lines,I18n.format("xf.miner.repair_after_restock"));
             int[] recoveryStart = state.getIntArray("RecoveryOrigin"), recoveryEnd = state.getIntArray("RecoveryDestination");
             if (recoveryStart.length == 3) {
@@ -193,8 +203,6 @@ public final class GUIMinerNPC extends GuiContainer {
             if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
             if (tools == 0 && lights == 0 && blocks == 0 && ladders == 0) detail(lines,I18n.format("xf.miner.no_requests"));
             detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));
-            if (!"none".equals(state.getString("StorageReason")))
-                detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
             detail(lines,I18n.format("xf.miner.cargo_capacity",state.getString("CargoCapacity")));
             if (!state.getString("CapacityDetail").isEmpty()) detail(lines,state.getString("CapacityDetail"));
             if (state.getInteger("Overflow") > 0) detail(lines,I18n.format("xf.miner.overflow",state.getInteger("Overflow")));
