@@ -210,6 +210,8 @@ Tracing is disabled by default and not persisted. Enable it before reproducing; 
 
 Movement reports include the task, original storage reason, selected depot, recovery phase, actual feet position, retained movement rejection and next repair/prerequisite. Initial connections and graph edges report their failed rise, drop, clearance, footing or landing predicate; clearance/landing details identify the sampled body position. A retained execution rejection is reported separately from the edge's current geometry. Recovery failures remain alongside the original navigation failure in the GUI details. Zero required supports or ladders do not indicate a material shortage. Overflow capacity is recalculated for an actual buffered stack, including metadata and NBT compatibility.
 
+Local ledge descent is reported separately from fixed ladder repair, with its builder position, next support/clearance, next landing and remaining stages. It runs before an unreachable column edit, places attachment prerequisites before each tread, and finishes each landing before advancing. Pending column repairs and the original depot trip remain retained. Material diagnostics describe the next descent operation; carried supplies for that stage prevent a missing-material report even when later ladder work remains incomplete.
+
 ## Utility and moderation commands
 
 | Command | Permission | Purpose |
