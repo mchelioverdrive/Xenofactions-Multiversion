@@ -122,8 +122,9 @@ public final class GUIMinerNPC extends GuiContainer {
             detail(lines,I18n.format("xf.miner.travel_recovery",I18n.format("xf.miner.travel_recovery."+state.getString("TravelRecoveryPhase"))));
             if (state.getInteger("RetainedBlocks") > 0) detail(lines,I18n.format("xf.miner.retained_blocks",state.getInteger("RetainedBlocks")));
             if (state.getInteger("DescentRemaining")>0) {
-                int[] builder=state.getIntArray("DescentBuilder"), support=state.getIntArray("DescentSupport"), landing=state.getIntArray("DescentLanding");
+                int[] builder=state.getIntArray("DescentBuilder"), support=state.getIntArray("DescentSupport"), landing=state.getIntArray("DescentLanding"), exit=state.getIntArray("DescentExit");
                 detail(lines,I18n.format("xf.miner.descent_stage",state.getInteger("DescentRemaining")));
+                if (exit.length==3) detail(lines,I18n.format("xf.miner.escape_exit",coord(exit[0],exit[1],exit[2])));
                 if (builder.length==3) detail(lines,I18n.format("xf.miner.descent_builder",coord(builder[0],builder[1],builder[2])));
                 if (support.length>=3) detail(lines,I18n.format("xf.miner.descent_support",coord(support[0],support[1],support[2])));
                 if (landing.length==3) detail(lines,I18n.format("xf.miner.descent_landing",coord(landing[0],landing[1],landing[2])));
