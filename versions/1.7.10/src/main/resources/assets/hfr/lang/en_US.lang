@@ -1990,6 +1990,7 @@ xf.miner.ladder_requirement=Ladders: carried %s; required now %s; missing %s
 xf.miner.plan_materials=Entire remaining repair: %s supports, %s ladders (staged)
 xf.miner.optional_reserves=Optional reserve targets: %s supports, 2 ladders
 xf.miner.supply_operation=Next repair: %s (%s)
+xf.miner.repair_prerequisite=Repair prerequisite: %s
 xf.miner.operation.clearance=clearance
 xf.miner.operation.support=backing / support
 xf.miner.operation.ladder=ladder rung

@@ -103,6 +103,7 @@ public final class GUIMinerNPC extends GuiContainer {
                 detail(lines,I18n.format("xf.miner.tool_problem",I18n.format("xf.miner.state."+state.getString("ToolProblem"))));
             if (!"none".equals(state.getString("StorageReason")))
                 detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
+            if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
             detail(lines,I18n.format("xf.miner.support_requirement",state.getInteger("BlocksCarried"),state.getInteger("SupportsRequired"),state.getInteger("SupportsMissing")));
             detail(lines,I18n.format("xf.miner.ladder_requirement",state.getInteger("LaddersCarried"),state.getInteger("LaddersRequired"),state.getInteger("LaddersMissing")));
             if (!state.getString("DepotFailureDetail").isEmpty()) detail(lines,state.getString("DepotFailureDetail"));
@@ -111,6 +112,8 @@ public final class GUIMinerNPC extends GuiContainer {
                     coord(supplyOperation[0],supplyOperation[1],supplyOperation[2]),I18n.format(supplyOperation[3] < 0 ? "xf.miner.operation.clearance"
                             : supplyOperation[3] == 0 ? "xf.miner.operation.support" : "xf.miner.operation.ladder")));
             if (!state.getString("SupplyBlocker").isEmpty()) detail(lines,state.getString("SupplyBlocker"));
+            int[] prerequisite = state.getIntArray("RepairPrerequisite");
+            if (prerequisite.length == 3) detail(lines,I18n.format("xf.miner.repair_prerequisite",coord(prerequisite[0],prerequisite[1],prerequisite[2])));
             int[] savedObjective = state.getIntArray("SavedWorkObjective"), taskDestination = state.getIntArray("TaskDestination"), temporary = state.getIntArray("TemporaryObjective");
             if (savedObjective.length == 3) detail(lines,I18n.format("xf.miner.saved_objective",coord(savedObjective[0],savedObjective[1],savedObjective[2])));
             if (taskDestination.length == 3) detail(lines,I18n.format("xf.miner.task_destination",coord(taskDestination[0],taskDestination[1],taskDestination[2])));
@@ -177,7 +180,6 @@ public final class GUIMinerNPC extends GuiContainer {
                 if (!state.getString("ArrivalFailure").isEmpty()) detail(lines,I18n.format("xf.miner.arrival",I18n.format("xf.miner.nav."+state.getString("ArrivalFailure"))));
                 detail(lines,I18n.format("xf.miner.actual",state.getString("ActualPosition")));
             }
-            if (!state.getString("NavigationDetail").isEmpty()) detail(lines,state.getString("NavigationDetail"));
             if ("locations".equals(state.getString("AccessStage")))
                 detail(lines,I18n.format("xf.miner.access_columns",state.getInteger("AccessColumnsChecked"),state.getInteger("AccessColumns")));
             if (state.getInteger("AccessProposals") > 0)

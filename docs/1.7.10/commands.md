@@ -208,6 +208,8 @@ Requires operator permission level 3. `<id>` accepts the existing miner UUID (ta
 
 Tracing is disabled by default and not persisted. Enable it before reproducing; reports without tracing still show current diagnostic fields. Endpoint failures separate footing, body clearance and ladder attachment. With tracing enabled, each exhausted endpoint search records at most eight nearby rejected candidates, including coordinates, movement type, failed predicate, collision bounds or sight-ray hit, required footing/attachment, interaction target/reach and any direct unfinished construction prerequisite. These use the same candidate predicates as planning; a rejected endpoint is not a failed movement attempt. Changes internal to protection mods may need the miner's existing Start/Resume action after the permission is corrected.
 
+Movement reports include the task, original storage reason, selected depot, recovery phase, actual feet position, retained movement rejection and next repair/prerequisite. Initial connections and graph edges report their failed rise, drop, clearance, footing or landing predicate; clearance/landing details identify the sampled body position. A retained execution rejection is reported separately from the edge's current geometry. Recovery failures remain alongside the original navigation failure in the GUI details. Zero required supports or ladders do not indicate a material shortage. Overflow capacity is recalculated for an actual buffered stack, including metadata and NBT compatibility.
+
 ## Utility and moderation commands
 
 | Command | Permission | Purpose |
