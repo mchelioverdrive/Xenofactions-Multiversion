@@ -8,7 +8,9 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import com.hfr.builder.BuilderPlacement;
+import com.hfr.compat.HbmMiningToolEnergy;
 import net.minecraft.block.Block;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.ChunkCoordinates;
 import net.minecraftforge.common.util.FakePlayer;
 import net.minecraftforge.event.world.BlockEvent.BreakEvent;
@@ -38,12 +40,16 @@ public final class MinerHarvestDrops {
             if (scope.player == player) return scope;
         return null;
     }
+    public static boolean canContinueHarvest(EntityPlayer player) {
+        return !(player instanceof FakePlayer) || find((FakePlayer)player) == null
+                || HbmMiningToolEnergy.problem(player.getHeldItem()).isEmpty();
+    }
     public static boolean defer(BreakEvent event) {
         if (!(event.getPlayer() instanceof FakePlayer)) return false;
         MinerHarvestDrops scope = find((FakePlayer)event.getPlayer());
         if (scope == null || scope.player.worldObj != event.world) return false;
         // Apply worker protections to every affected block, without restricting tool geometry.
-        if (!scope.allowed.test(event) || !WorkerAccess.ownsLand(event.world,event.x,event.z,scope.factionId)
+        if (!canContinueHarvest(scope.player) || !scope.allowed.test(event) || !WorkerAccess.ownsLand(event.world,event.x,event.z,scope.factionId)
                 || BuilderPlacement.protectedBlock(event.world,event.x,event.y,event.z)
                 || event.block.getBlockHardness(event.world,event.x,event.y,event.z) < 0
                 || event.world.getTileEntity(event.x,event.y,event.z) != null || event.block.getMaterial().isLiquid())
@@ -63,6 +69,7 @@ public final class MinerHarvestDrops {
         boolean outermost = scope == null;
         if (outermost) scope = begin(player,factionId,allowed,completed);
         try {
+            if (!canContinueHarvest(player)) return false;
             player.theItemInWorldManager.tryHarvestBlock(x,y,z);
             // A hook may handle removal itself and return false to stop vanilla harvesting.
             // Conversely, a true manager result must never skip a still-solid work cell.

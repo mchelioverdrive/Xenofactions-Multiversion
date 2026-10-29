@@ -3,7 +3,6 @@ package com.hfr.mixin.bootstrap;
 import com.gtnewhorizon.gtnhmixins.IEarlyMixinLoader;
 import cpw.mods.fml.relauncher.IFMLLoadingPlugin;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -19,10 +18,10 @@ public final class XFMixinLoader implements IFMLLoadingPlugin, IEarlyMixinLoader
         // The pinned coremod JAR is already on LaunchClassLoader's path at this phase.
         // Do not load its classes here, or query FML's not-yet-discovered normal mods.
         if (loadedCoreMods.contains("com.cardinalstar.cubicchunks.asm.coremod.CubicChunksCoreMod")) {
-            return Arrays.asList("MixinChatRewards", "earth.MixinCubicPlayerManager", "earth.MixinNetworkChannel",
+            return Arrays.asList("MixinChatRewards", "MixinMinerToolEnergy", "earth.MixinCubicPlayerManager", "earth.MixinNetworkChannel",
                     "earth.MixinWorldSyncStateMachine");
         }
-        return Collections.singletonList("MixinChatRewards");
+        return Arrays.asList("MixinChatRewards", "MixinMinerToolEnergy");
     }
 
     @Override public String[] getASMTransformerClass() { return new String[0]; }

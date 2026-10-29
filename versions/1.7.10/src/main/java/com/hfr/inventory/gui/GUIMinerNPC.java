@@ -86,6 +86,7 @@ public final class GUIMinerNPC extends GuiContainer {
         ItemStack tool = ((Slot)inventorySlots.inventorySlots.get(27)).getStack();
         if (tool != null) {
             String durability = tool.isItemStackDamageable() ? (tool.getMaxDamage()-tool.getItemDamage())+"/"+tool.getMaxDamage() : I18n.format("xf.miner.no_wear");
+            if (state != null && "tool_depleted".equals(state.getString("ToolProblem"))) durability = I18n.format("xf.miner.low_charge");
             line(durability,29,48,83,0xdddddd);
         }
         line(I18n.format("xf.miner.cargo_label"),8,69,162,0xffffff);
@@ -98,6 +99,8 @@ public final class GUIMinerNPC extends GuiContainer {
         if (state != null) {
             detail(lines,I18n.format("xf.miner.running",I18n.format(state.getBoolean("Running") ? "xf.miner.active" : "xf.miner.inactive")));
             detail(lines,"\u00a7e"+I18n.format("xf.miner.status",I18n.format("xf.miner.state."+state.getString("Status"))));
+            if (!state.getString("ToolProblem").isEmpty())
+                detail(lines,I18n.format("xf.miner.tool_problem",I18n.format("xf.miner.state."+state.getString("ToolProblem"))));
             if (!"none".equals(state.getString("StorageReason")))
                 detail(lines,I18n.format("xf.miner.storage_reason",I18n.format("xf.miner.reason."+state.getString("StorageReason"))));
             detail(lines,I18n.format("xf.miner.support_requirement",state.getInteger("BlocksCarried"),state.getInteger("SupportsRequired"),state.getInteger("SupportsMissing")));
@@ -199,7 +202,8 @@ public final class GUIMinerNPC extends GuiContainer {
             if (!state.getString("SegmentFailure").isEmpty()) detail(lines,I18n.format("xf.miner.segment_failure",state.getString("SegmentFailure")));
             int tools = state.getInteger("PickaxesRequested"), level = state.getInteger("HarvestLevel"), lights = state.getInteger("TorchesRequested");
             detail(lines,I18n.format("xf.miner.requests"));
-            if (tools > 0) detail(lines,I18n.format(level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick",level));
+            if (tools > 0) detail(lines,I18n.format(state.getString("ToolRequestKey").isEmpty()
+                    ? level >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick" : state.getString("ToolRequestKey"),level));
             if (lights > 0) detail(lines,I18n.format("xf.miner.need_torches",lights));
             if (tools == 0 && lights == 0 && blocks == 0 && ladders == 0) detail(lines,I18n.format("xf.miner.no_requests"));
             detail(lines,I18n.format("xf.miner.task",I18n.format("xf.miner.task."+state.getString("Task"))));

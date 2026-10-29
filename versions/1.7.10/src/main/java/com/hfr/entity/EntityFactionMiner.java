@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.UUID;
 import com.hfr.builder.BuilderPlacement;
 import com.hfr.clowder.Clowder;
+import com.hfr.compat.HbmMiningToolEnergy;
 import com.hfr.items.ItemMinerWand;
 import com.hfr.main.MainRegistry;
 import com.hfr.util.XFLog;
@@ -301,6 +302,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 + " reversalsWithoutWork=" + debugReversals + " stall=" + ladderStallTicks + " decision=" + movementDecision);
         lines.add("Navigation=" + navigationReason + "; " + navigationDetail + "; segment=" + segmentFailure);
         if (!movementOnly) {
+            lines.add("Tool=" + (getHeldItem() == null ? "none" : itemIdentity(getHeldItem()))
+                    + "; eligibility=" + toolProblem(getHeldItem()));
             lines.add("Repair=" + buildingAccess + " pending=" + accessRepairPending + " operation=" + accessIndex + "/" + accessPlan.size()
                     + " savedObjective=" + Arrays.toString(accessDestination) + " work=" + Arrays.toString(workPositionTarget));
             lines.add("Supports carried=" + accessCount(false) + " required=" + requiredSupports() + " missing=" + Math.max(0,requiredSupports()-accessCount(false)));
@@ -491,6 +494,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (reason == StorageReason.TORCHES) stockTorchesFromCargo();
         refreshSupplyRequirements();
         if (!storageNeeded(reason)) return;
+        if (reason == StorageReason.TOOL && debugHistory != null) trace("rejected",toolRejection(getHeldItem()));
         storageReason = reason;
         triedDepots.clear(); waitingForDepot = false; activeDepot = null;
         if (reason != StorageReason.OVERFLOW) capacityDetail = "";
@@ -779,6 +783,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
     }
     private void blockObjective(String state) {
+        if ("no_access".equals(state) && !HbmMiningToolEnergy.problem(getHeldItem()).isEmpty()) state = toolProblem(getHeldItem());
         // A wait is the final recovery state, never the gate in front of recovery.
         if (movementRecovery.begin(state)) return;
         if (storageTask() && activeDepot != null) { nextDepot(true); return; }
@@ -796,6 +801,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private long supplyStamp() { return supplyStamp(false); }
     private long supplyStamp(boolean relevantOnly) {
         long value = 1;
+        boolean watchTools = relevantOnly && (!suitable(getHeldItem()) || requiredHarvest >= 0);
         List<IInventory> inventories=new java.util.ArrayList<IInventory>(); inventories.add(this);
         for (Depot depot : depots) {
             IInventory station=depotInventory(depot); value=31*value+depot.hashCode()+(station == null ? 0 : 1);
@@ -805,7 +811,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             ItemStack stack = inventory.getStackInSlot(i);
             // Access can be blocked before a plan is selected, too.
             if (relevantOnly && !(configured && (accessMaterial(stack,false) || accessMaterial(stack,true)))
-                    && !(pickaxe(stack) && (getHeldItem() == null || requiredHarvest >= 0)) && !(needsLight && isTorch(stack))) continue;
+                    && !(pickaxe(stack) && watchTools) && !(needsLight && isTorch(stack))) continue;
             // Moving the same stack from an unreachable station into cargo is a
             // relevant delivery even when item/count/NBT totals do not change.
             value = 31*value+i;
@@ -1135,7 +1141,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 if (depotWaitSupplies != supplyStamp() || depotTerrainChanged()) {
                     triedDepots.clear(); failedMovementEdges.clear(); failedEndpoints.clear();
                 }
-                else if ("depots_unreachable".equals(depotFailure)) { status=depotFailure; supplyCheckTicks=40; return; }
+                else if ("depots_unreachable".equals(depotFailure)) { status=depotWaitStatus(); supplyCheckTicks=40; return; }
             }
             if (!chooseDepot()) return;
             transition(Task.TO_STORAGE,"linked depot selected",depotDestination());
@@ -1151,7 +1157,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         if (waitForObjectiveChange()) return;
         if (!waitingForDepot && !"chunk".equals(status) && !"no_access".equals(status) && !"access_materials".equals(status) && !"no_tool".equals(status)
-                && !"tool_level".equals(status) && !"no_torches".equals(status) && !"no_ladders".equals(status) && !"storage_full".equals(status)
+                && !"tool_level".equals(status) && !"tool_depleted".equals(status) && !"tool_energy_error".equals(status)
+                && !"no_torches".equals(status) && !"no_ladders".equals(status) && !"storage_full".equals(status)
                 && !"no_chest".equals(status) && !"station_blocked".equals(status)) objectiveTicks += 10;
         if (objectiveFailures >= OBJECTIVE_FAILURE_LIMIT || objectiveTicks >= OBJECTIVE_TICK_LIMIT) {
             navigationDetail = "Last obstacle=" + navigationReason + "; " + navigationDetail
@@ -1280,6 +1287,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 status = "recovering";
                 return;
             }
+            if (!suitable(getHeldItem())) { requestMiningTool(null); return; }
             FakePlayer player = actor();
             player.setPosition(posX, posY, posZ); player.onGround = onGround;
             player.inventory.mainInventory[0] = getHeldItem(); player.inventory.currentItem = 0;
@@ -1301,7 +1309,11 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             if (miningProgress < 1) return;
             boolean harvested = harvestWithTool(player,x,y,z);
             miningProgress = 0; miningBlock = null;
-            if (!harvested) { stop("harvest_denied"); return; }
+            if (!harvested) {
+                if (!suitable(getHeldItem())) requestMiningTool(null);
+                else stop("harvest_denied");
+                return;
+            }
             if (retained) retireAccess(x,y,z);
             usefulProgress("harvested target");
             advance(workCursor);
@@ -1312,7 +1324,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 else { transition(Task.COMPLETE,"last block had no carried output",null); stop("complete"); }
             }
             else if (cargoFull()) beginStorage(StorageReason.CAPACITY);
-            else if (getHeldItem() == null) { toolBroken = true; beginStorage(StorageReason.TOOL); }
+            else if (!suitable(getHeldItem())) { toolBroken = getHeldItem() == null; requestMiningTool(null); }
             return;
         }
         if (!blockWorkRemaining()) {
@@ -4254,6 +4266,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             return true;
         }
         if (!accessSupplyChecked) checkAccessStation();
+        if (!HbmMiningToolEnergy.problem(getHeldItem()).isEmpty()) { requestMiningTool(localRecoveryCell); return true; }
         if (!storageTask() && accessStationReachable && (requiredSupports() > accessCount(false) || requiredLadders() > accessCount(true))) {
             beginStorage(StorageReason.ACCESS); return true;
         }
@@ -4282,6 +4295,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     }
     private String supplyBlockKey(Block block,int meta) { return Block.getIdFromBlock(block)+":"+meta; }
     private boolean findLocalSupply() {
+        if (!suitable(getHeldItem())) { requestMiningTool(localRecoveryCell); return true; }
         int end = Math.min(13*13*7,supplySearch+64);
         FakePlayer player = actor(); player.setPosition(posX,posY,posZ); player.onGround = onGround; player.inventory.mainInventory[0] = getHeldItem();
         for (; supplySearch < end; supplySearch++) {
@@ -4443,6 +4457,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         if (!staircaseAccess && obstructed) reconcileAccessPlan();
         refreshSupplyRequirements();
+        if (supplyOperation != null && supplyOperation[3] < 0 && !HbmMiningToolEnergy.problem(getHeldItem()).isEmpty()) {
+            requestMiningTool(supplyOperation); return;
+        }
         if (supplyOperation != null && supplyBlocker.isEmpty() && accessIndex < accessPlan.size() && accessPlan.get(accessIndex) != supplyOperation) {
             accessPlan.remove(supplyOperation); accessPlan.add(accessIndex,supplyOperation);
             resetPath(); clearRouteSearch(); interactionTarget = selectedEndpoint = null; failedEndpoints.clear();
@@ -4580,10 +4597,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     private void clearAccessCell(int[] p) {
         boolean local = p == localRecoveryCell;
         if (!suitable(getHeldItem())) {
-            requestedTools = 1;
-            if (accessStationReachable && !storageTask()) beginStorage(StorageReason.TOOL);
-            else { accessFailure("supplies",p,"A suitable pickaxe is needed for access clearance; station unreachable"); blockObjective("no_tool"); }
-            return;
+            requestMiningTool(p); return;
         }
         if (!moveNear(p[0],p[1]+1,p[2],true)) {
             if ("route_failed".equals(status)) {
@@ -4621,6 +4635,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         int supportsBefore = accessCount(false);
         boolean harvested = harvestWithTool(player,p[0],p[1],p[2]);
         resetMining();
+        // Partial native AOE can spend the last charge before clearing the
+        // requested cell. Keep that operation and the excavation cursor pending.
+        if (!harvested && !suitable(getHeldItem())) { requestMiningTool(p); return; }
         if (local) {
             if (!harvested) { accessFailure("clearance",p,"Local harvest refused by tool or protection"); deferAccessOperation(p); return; }
             if (gatheringSupport && accessCount(false) <= supportsBefore) {
@@ -4630,7 +4647,9 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
             localRecoveryCell = null;
             // Reattempt reachable repair after EACH actual supply harvest.
             if (gatheringSupport) { gatheringSupport = false; failedAccessOperations.clear(); }
-            usefulProgress("harvested local recovery terrain and collected actual drops"); return;
+            usefulProgress("harvested local recovery terrain and collected actual drops");
+            if (!suitable(getHeldItem())) requestMiningTool(p);
+            return;
         }
         if (!harvested || !accessPresent(p)) {
             // finishHarvest may have rebuilt the operation objects after partial AOE.
@@ -4649,8 +4668,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         } else reconcileAccessPlan();
         failedAccessOperations.clear();
         usefulProgress("harvested access clearance");
+        if (!suitable(getHeldItem())) requestMiningTool(p);
     }
     private boolean harvestWithTool(FakePlayer player,int x,int y,int z) {
+        if (!suitable(getHeldItem())) { resetMining(); player.inventory.mainInventory[0] = null; return false; }
         retainLadderBacking(accessBlocks);
         retainLadderBacking(accessPlan);
         List<int[]> before = new java.util.ArrayList<int[]>();
@@ -4675,6 +4696,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 }, changed -> finishHarvest(changed,before)); }
         finally {
             setCurrentItemOrArmor(0,player.inventory.mainInventory[0]); player.inventory.mainInventory[0] = null;
+            if (!suitable(getHeldItem())) resetMining();
         }
     }
     private boolean requiredClearance(int x,int y,int z) {
@@ -4935,7 +4957,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (failedAccessOperations.contains(cell)) return "Repair operation exhausted its builder positions";
         if (cell[3] < 0) {
             if (!accessHarvestable(cell,true)) return "Clearance is protected or cannot be harvested";
-            if (!suitable(getHeldItem())) return "Clearance needs a suitable pickaxe";
+            if (!suitable(getHeldItem())) return toolRejection(getHeldItem());
             FakePlayer player = actor(); ItemStack previous = player.inventory.mainInventory[0];
             player.inventory.mainInventory[0] = getHeldItem();
             try {
@@ -5071,7 +5093,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
                 + " count=" + stack.stackSize + " nbt=" + (stack.hasTagCompound() ? stack.getTagCompound().toString() : "{}");
     }
     private String supplyRejection(ItemStack stack,int type) {
-        if (type == 0) return "pickaxe is broken, below the required tier or cannot harvest the target";
+        if (type == 0) return toolRejection(stack);
         if (type == 3) return "item is not a vanilla ladder";
         Block block = ((net.minecraft.item.ItemBlock)stack.getItem()).field_150939_a;
         if (oreMaterial(stack,block)) return "ore is excluded from support material";
@@ -5122,7 +5144,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         activeDepot=null;
         depotFailure=depots.isEmpty() ? "no_depots" : !available ? "depots_unavailable" : useful && unreachable ? "depots_unreachable"
                 : unloading ? "storage_full" : depotSupplyFailure();
-        status=depotFailure; waitingForDepot=true; depotWaitSupplies=supplyStamp(); supplyCheckTicks=40;
+        status=depotWaitStatus(); waitingForDepot=true; depotWaitSupplies=supplyStamp(); supplyCheckTicks=40;
         return false;
     }
     private boolean nextDepot() { return nextDepot(false); }
@@ -5138,7 +5160,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (nextDepot()) return;
         if (storageTask() && "storage_full".equals(missing) && !"depots_unreachable".equals(depotFailure)
                 && !"depots_unavailable".equals(depotFailure)) {
-            depotFailure = status = "storage_full";
+            depotFailure = "storage_full"; status = depotWaitStatus();
             depotFailureDetail = "Available depots cannot accept the displaced unusable pickaxe";
         }
     }
@@ -5188,17 +5210,22 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (beforeSupplies != supplyStamp()) triedDepots.clear();
         boolean miningRemains = blockWorkRemaining();
         if (miningRemains && !suitable(getHeldItem())) {
+            int toolSlot = -1;
+            for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++)
+                if (suitable(chest.getStackInSlot(i))) { toolSlot = i; break; }
+            // Keep the rejected tool equipped until a real replacement exists.
+            // A depleted tool deposited here can never qualify for withdrawal.
+            if (toolSlot < 0) {
+                requestedTools = 1; waitForDepotSupplies(toolProblem(getHeldItem())); return;
+            }
             if (getHeldItem() != null) {
                 ItemStack old = getHeldItem(); insert(chest, old);
                 if (old.stackSize > 0) { waitForDepotSupplies("storage_full"); return; }
                 setCurrentItemOrArmor(0, null);
             }
-            for (int i = firstSlot(chest); i < chest.getSizeInventory(); i++) {
-                ItemStack stack = chest.getStackInSlot(i);
-                if (suitable(stack)) { setCurrentItemOrArmor(0, chest.decrStackSize(i, 1)); chest.markDirty(); break; }
-            }
+            setCurrentItemOrArmor(0, chest.decrStackSize(toolSlot, 1)); chest.markDirty();
             if (!suitable(getHeldItem())) {
-                requestedTools = 1; status = requiredHarvest >= 0 ? "tool_level" : "no_tool";
+                requestedTools = 1; status = toolProblem(getHeldItem());
                 waitForDepotSupplies(status); return;
             }
         }
@@ -5286,12 +5313,16 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         }
         return "no_chest";
     }
-    private boolean suitable(ItemStack stack) {
-        if (!pickaxe(stack) || stack.isItemStackDamageable() && stack.getItemDamage() >= stack.getMaxDamage()) return false;
-        if (requiredHarvest < 0) return true;
-        if (stack.getItem().getHarvestLevel(stack, "pickaxe") < requiredHarvest) return false;
+    private boolean suitable(ItemStack stack) { return toolProblem(stack).isEmpty(); }
+    private String toolProblem(ItemStack stack) {
+        if (!pickaxe(stack)) return "no_tool";
+        String energy = HbmMiningToolEnergy.problem(stack);
+        if (!energy.isEmpty()) return energy;
+        if (stack.isItemStackDamageable() && stack.getItemDamage() >= stack.getMaxDamage()) return "no_tool";
+        if (requiredHarvest < 0) return "";
+        if (stack.getItem().getHarvestLevel(stack, "pickaxe") < requiredHarvest) return "tool_level";
         int width = plan[5]-plan[3]+1, length = plan[6]-plan[4]+1;
-        if (!configured || employerId == null || width <= 0 || length <= 0) return false;
+        if (!configured || employerId == null || width <= 0 || length <= 0) return "tool_level";
         int current = cursor >= width*length*(plan[7]-plan[8]+1) && rampCleanup >= 0 ? rampCursor(rampCleanup)
                 : targetCursor >= cursor && targetCursor/(width*length) == cursor/(width*length) ? targetCursor : cursor;
         if (cursor >= totalWork() && rampCleanup < 0 && !retainedTargets.isEmpty()) current = retainedWork();
@@ -5300,14 +5331,42 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (localRecoveryCell != null || buildingAccess && accessIndex < accessPlan.size() && accessPlan.get(accessIndex)[3] < 0) {
             int[] cell = localRecoveryCell == null ? accessPlan.get(accessIndex) : localRecoveryCell; x = cell[0]; y = cell[1]; z = cell[2];
         }
-        if (!worldObj.blockExists(x,y,z)) return false;
+        if (!worldObj.blockExists(x,y,z)) return "tool_level";
         FakePlayer player = actor(); ItemStack previous = player.inventory.mainInventory[0];
-        player.inventory.mainInventory[0] = stack;
-        try { return worldObj.getBlock(x,y,z).canHarvestBlock(player,worldObj.getBlockMetadata(x,y,z)); }
+        player.inventory.mainInventory[0] = stack.copy();
+        try { return worldObj.getBlock(x,y,z).canHarvestBlock(player,worldObj.getBlockMetadata(x,y,z)) ? "" : "tool_level"; }
         finally { player.inventory.mainInventory[0] = previous; }
+    }
+    private String toolRejection(ItemStack stack) {
+        String reason = toolProblem(stack);
+        if ("tool_depleted".equals(reason)) return "Powered pickaxe charge is below its native minimum mining cost";
+        if ("tool_energy_error".equals(reason)) return "Powered pickaxe energy API could not be queried safely";
+        if ("tool_level".equals(reason)) return "Pickaxe is below the required harvest level or cannot harvest the target";
+        return "Missing or broken pickaxe";
+    }
+    private String toolRequestKey() {
+        return !HbmMiningToolEnergy.problem(getHeldItem()).isEmpty()
+                ? requiredHarvest >= 0 ? "xf.miner.request_charged_tier" : "xf.miner.request_charged"
+                : requiredHarvest >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick";
+    }
+    private String depotWaitStatus() {
+        String energy = HbmMiningToolEnergy.problem(getHeldItem());
+        return blockWorkRemaining() && !energy.isEmpty() ? energy : depotFailure;
+    }
+    private void requestMiningTool(int[] clearance) {
+        resetMining(); equipCarriedTool();
+        if (suitable(getHeldItem())) return;
+        requestedTools = 1;
+        String reason = toolProblem(getHeldItem());
+        if (debugHistory != null && !reason.equals(status)) trace("rejected",toolRejection(getHeldItem()));
+        if ((buildingAccess || localRecoveryCell != null || gatheringSupport) && (storageTask() || !accessStationReachable)) {
+            accessFailure("tool",clearance,toolRejection(getHeldItem()) + "; no usable tool on the current access route");
+            blockObjective(reason);
+        } else beginStorage(StorageReason.TOOL);
     }
     private void equipCarriedTool() {
         if (suitable(getHeldItem())) return;
+        resetMining();
         for (int i = 0; i < cargo.length; i++) if (suitable(cargo[i])) {
             if (cargo[i].stackSize == 1) {
                 ItemStack replacement = cargo[i]; cargo[i] = getHeldItem(); setCurrentItemOrArmor(0, replacement); return;
@@ -5489,7 +5548,7 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         EntityPlayerMP recipient = supplyRecipient();
         if (recipient == null) return;
         // One private message per Miner per minute, including changing requests and reopen/Start spam.
-        ChatComponentTranslation tool = new ChatComponentTranslation(requiredHarvest >= 0 ? "xf.miner.request_tier" : "xf.miner.request_pick", requiredHarvest);
+        ChatComponentTranslation tool = new ChatComponentTranslation(toolRequestKey(), requiredHarvest);
         ChatComponentTranslation light = new ChatComponentTranslation("xf.miner.need_torches", requestedTorches);
         ChatComponentTranslation request = requestedTools > 0 ? tool : light;
         if (requestedTools > 0 && requestedTorches > 0) request = new ChatComponentTranslation("xf.miner.both_requests", tool, light);
@@ -5552,6 +5611,8 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
         if (destination != null) tag.setIntArray("Destination",destination);
         if (waypoint != null) tag.setIntArray("Waypoint",waypoint);
         tag.setInteger("PickaxesRequested", requestedTools);
+        tag.setString("ToolProblem",toolProblem(getHeldItem()));
+        tag.setString("ToolRequestKey",toolRequestKey());
         tag.setInteger("HarvestLevel", requiredHarvest);
         tag.setInteger("TorchesRequested", requestedTorches);
         tag.setInteger("BlocksRequested",requestedBlocks); tag.setInteger("LaddersRequested",requestedLadders);
@@ -5857,7 +5918,10 @@ public final class EntityFactionMiner extends EntityLiving implements IInventory
     public int getInventoryStackLimit() { return 64; }
     // Cargo/torch slot synchronization must not restart a partly mined block.
     // The work loop compares the actual tool, target, block and metadata instead.
-    public void markDirty() { supplyCheckTicks = 0; accessSupplyChecked = false; stageSupports = stageLadders = -1; }
+    public void markDirty() {
+        supplyCheckTicks = 0; accessSupplyChecked = false; stageSupports = stageLadders = -1;
+        if (!worldObj.isRemote && miningProgress > 0 && !suitable(getHeldItem())) resetMining();
+    }
     public boolean isUseableByPlayer(EntityPlayer player) { return mayManage(player); }
     public void openInventory() { }
     public void closeInventory() { }
